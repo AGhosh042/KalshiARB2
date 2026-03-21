@@ -58,6 +58,22 @@ export class ArbStrategy {
   private lastCoinbaseDirection: 'up' | 'down' | 'flat' | null = null;
   private lastCoinbaseMinusUnderlyingDollars: number | null = null;
 
+  // Last evaluated Coinbase price — used in placeEntryOrder for edge calculation.
+  private lastEvaluatedCoinbasePrice: number | null = null;
+
+  // Momentum EMAs (tick-based, not time-based — each Coinbase price update is one tick).
+  // alpha5 ≈ fast (tracks last ~5 ticks), alpha20 ≈ slow (tracks last ~20 ticks).
+  private ema5s: number | null = null;
+  private ema20s: number | null = null;
+  private static readonly EMA5_ALPHA = 2 / (5 + 1);   // 0.333
+  private static readonly EMA20_ALPHA = 2 / (20 + 1);  // 0.095
+
+  // Regime filter: track strike crossings within a rolling window.
+  private crossTimestamps: number[] = [];
+  private static readonly REGIME_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+  private static readonly REGIME_MAX_CROSSES = 3;
+  private regimePausedUntilMs = 0;
+
   // Sequential exit-then-entry state machine:
   // - phase='exit' waits for the exit order to fully flatten position to 0.
   // - phase='entry' waits for the entry order to reach the target side.
@@ -214,8 +230,14 @@ export class ArbStrategy {
    * Determines the position size in contracts.
    * min(MAX_POSITION_SIZE, floor(balance * balanceFractionPerTrade / askPriceInDollars))
    */
-  private computePositionSize(balanceCents: number, askPriceCents: number): number {
-    const fractionBalance = balanceCents * config.strategy.balanceFractionPerTrade;
+  private computePositionSize(balanceCents: number, askPriceCents: number, edgeCents?: number): number {
+    // Dynamic sizing: scale position by edge magnitude relative to a reference edge of 10c.
+    // Low edge (7c) → 70% of base size. High edge (20c) → 200% (capped by maxPositionSize).
+    const baseFraction = config.strategy.balanceFractionPerTrade;
+    const edgeMultiplier = edgeCents !== undefined
+      ? Math.min(2.0, Math.max(0.5, edgeCents / 10))
+      : 1.0;
+    const fractionBalance = balanceCents * baseFraction * edgeMultiplier;
     const maxFromBalance = Math.floor(fractionBalance / askPriceCents);
     return Math.max(1, Math.min(config.strategy.maxPositionSize, maxFromBalance));
   }
@@ -310,6 +332,11 @@ export class ArbStrategy {
       this.exitEscalatedToMarket = false;
       this.syntheticKalshiUnderlyingDollars = null;
       this.warnedExpirationFallbackForTicker = null;
+      // Reset EMAs and regime filter for the new market.
+      this.ema5s = null;
+      this.ema20s = null;
+      this.crossTimestamps = [];
+      this.regimePausedUntilMs = 0;
     }
 
     const coinbasePrice = coinbaseData.price;
@@ -352,6 +379,19 @@ export class ArbStrategy {
     if (secsLeft < config.strategy.minSecondsBeforeExpiry) {
       return this.hold(`Market closes in ${secsLeft.toFixed(0)}s — too close to expiry`);
     }
+    // --- Guard: Must not have too much time remaining (weak signal, uncertain) ---
+    if (secsLeft > config.strategy.maxSecondsBeforeExpiry) {
+      return this.hold(`Market closes in ${secsLeft.toFixed(0)}s — too far from expiry (max ${config.strategy.maxSecondsBeforeExpiry}s)`);
+    }
+
+    // --- Guard: Regime filter — pause trading if BTC is whipsawing around the strike ---
+    const now = Date.now();
+    if (now < this.regimePausedUntilMs) {
+      const pauseSecsLeft = ((this.regimePausedUntilMs - now) / 1000).toFixed(0);
+      return this.hold(`Regime pause active — choppy market, resuming in ${pauseSecsLeft}s`);
+    }
+    // Prune cross timestamps older than the regime window.
+    this.crossTimestamps = this.crossTimestamps.filter(t => now - t < ArbStrategy.REGIME_WINDOW_MS);
 
     // --- Guard: if either YES/NO side has no contracts, do not trade ---
     if (this.isOrderbookUnavailable(market)) {
@@ -387,6 +427,18 @@ export class ArbStrategy {
     const isLong = positionContracts > 0;
     const isShort = positionContracts < 0;
     const isFlat = positionContracts === 0;
+
+    // Store for use in placeEntryOrder edge calculation.
+    this.lastEvaluatedCoinbasePrice = coinbasePrice;
+
+    // Update momentum EMAs on every tick.
+    if (this.ema5s === null || this.ema20s === null) {
+      this.ema5s = coinbasePrice;
+      this.ema20s = coinbasePrice;
+    } else {
+      this.ema5s = this.ema5s + ArbStrategy.EMA5_ALPHA * (coinbasePrice - this.ema5s);
+      this.ema20s = this.ema20s + ArbStrategy.EMA20_ALPHA * (coinbasePrice - this.ema20s);
+    }
 
     // Update current-trade unrealized P/L mark-to-market (based on mid prices).
     // This is only meaningful when we have entry info stored.
@@ -640,6 +692,10 @@ export class ArbStrategy {
       }
     }
 
+    // --- TP / SL / TTE exits: check before cross detection ---
+    const tpslExit = await this.checkProfitAndLossExits(market, coinbasePrice, positionContracts, targetPriceDollars, secsLeft);
+    if (tpslExit) return tpslExit;
+
     // --- Need a previous tick to detect intersections ---
     if (prevPrice === null || prevKalshiUnderlyingPriceDollars === null) {
       if (isLong) {
@@ -668,9 +724,28 @@ export class ArbStrategy {
     if (crossUp) {
       this.lastCrossDirection = 'up';
       this.lastCrossAtMs = Date.now();
+      // Record cross for regime filter.
+      this.crossTimestamps.push(Date.now());
+      if (this.crossTimestamps.length > ArbStrategy.REGIME_MAX_CROSSES) {
+        // Too many crosses in the window — market is choppy, pause for 2 minutes.
+        logger.warn('Regime filter triggered — too many strike crosses, pausing 2 min', {
+          crossCount: this.crossTimestamps.length,
+          windowMs: ArbStrategy.REGIME_WINDOW_MS,
+        });
+        this.regimePausedUntilMs = Date.now() + 2 * 60 * 1000;
+      }
     } else if (crossDown) {
       this.lastCrossDirection = 'down';
       this.lastCrossAtMs = Date.now();
+      // Record cross for regime filter.
+      this.crossTimestamps.push(Date.now());
+      if (this.crossTimestamps.length > ArbStrategy.REGIME_MAX_CROSSES) {
+        logger.warn('Regime filter triggered — too many strike crosses, pausing 2 min', {
+          crossCount: this.crossTimestamps.length,
+          windowMs: ArbStrategy.REGIME_WINDOW_MS,
+        });
+        this.regimePausedUntilMs = Date.now() + 2 * 60 * 1000;
+      }
     }
 
     // --- Update extremum tracking while holding (not during pending phases) ---
@@ -704,6 +779,20 @@ export class ArbStrategy {
     // --- Flat: enter based on cross direction ---
     if (isFlat) {
       if (crossUp) {
+        // Displacement gate: BTC must be meaningfully past strike, not just touching it.
+        const displacementPct = Math.abs(coinbasePrice - targetPriceDollars) / targetPriceDollars * 100;
+        if (displacementPct < config.strategy.displacementThresholdPct) {
+          return this.hold(`Displacement ${displacementPct.toFixed(3)}% < threshold ${config.strategy.displacementThresholdPct}% — noise cross, skipping`);
+        }
+        // Momentum gate: fast EMA must be above slow EMA (upward momentum confirmed).
+        if (this.ema5s !== null && this.ema20s !== null && this.ema5s <= this.ema20s) {
+          return this.hold(`Momentum not confirmed for YES: ema5s=${this.ema5s.toFixed(2)} <= ema20s=${this.ema20s.toFixed(2)}`);
+        }
+        // Spread gate: skip if Kalshi spread is too wide (illiquid market).
+        const yesSpread = market.yes_ask - market.yes_bid;
+        if (yesSpread > 8) {
+          return this.hold(`Spread too wide for YES entry: ${yesSpread}¢ > 8¢`);
+        }
         const entryRes = await this.placeEntryOrder(market, 'yes');
         if (entryRes.action === 'hold') return entryRes;
 
@@ -721,6 +810,20 @@ export class ArbStrategy {
         };
       }
       if (crossDown) {
+        // Displacement gate: BTC must be meaningfully past strike, not just touching it.
+        const displacementPct = Math.abs(coinbasePrice - targetPriceDollars) / targetPriceDollars * 100;
+        if (displacementPct < config.strategy.displacementThresholdPct) {
+          return this.hold(`Displacement ${displacementPct.toFixed(3)}% < threshold ${config.strategy.displacementThresholdPct}% — noise cross, skipping`);
+        }
+        // Momentum gate: fast EMA must be below slow EMA (downward momentum confirmed).
+        if (this.ema5s !== null && this.ema20s !== null && this.ema5s >= this.ema20s) {
+          return this.hold(`Momentum not confirmed for NO: ema5s=${this.ema5s.toFixed(2)} >= ema20s=${this.ema20s.toFixed(2)}`);
+        }
+        // Spread gate: skip if Kalshi spread is too wide (illiquid market).
+        const noSpread = market.no_ask - market.no_bid;
+        if (noSpread > 8) {
+          return this.hold(`Spread too wide for NO entry: ${noSpread}¢ > 8¢`);
+        }
         const entryRes = await this.placeEntryOrder(market, 'no');
         if (entryRes.action === 'hold') return entryRes;
 
@@ -911,8 +1014,27 @@ export class ArbStrategy {
     if (!can.ok) return this.hold(can.reason ?? 'Cannot place entry order');
 
     const askPriceCents = side === 'yes' ? market.yes_ask : market.no_ask;
+    const bidPriceCents = side === 'yes' ? market.yes_bid : market.no_bid;
+
+    // Edge check: ensure Kalshi hasn't already repriced before we enter.
+    // Fair value is computed from Coinbase displacement vs strike using the same sigmoid used for orders.
+    const strikeDollars = market.expiration_value_dollars ?? config.strategy.referencePriceDollars;
+    const coinbasePrice = this.lastEvaluatedCoinbasePrice ?? strikeDollars;
+    const fairValueYesCents = this.coinbaseToYesLimitCents(coinbasePrice, strikeDollars);
+    const fairValueCents = side === 'yes' ? fairValueYesCents : (100 - fairValueYesCents);
+    const spread = askPriceCents - bidPriceCents;
+    // Required edge must cover the spread plus a profit buffer.
+    const requiredEdge = Math.max(config.strategy.kalshiEdgeThreshold, spread + 3);
+    const edge = fairValueCents - askPriceCents;
+    if (edge < requiredEdge) {
+      logger.info('Edge check failed — Kalshi already repriced', {
+        side, askPriceCents, fairValueCents, edge: edge.toFixed(1), requiredEdge: requiredEdge.toFixed(1), spread,
+      });
+      return this.hold(`Edge ${edge.toFixed(1)}c < required ${requiredEdge.toFixed(1)}c — market already repriced`);
+    }
     const balanceCents = config.dryRun ? this.demoCashCents : await this.kalshiClient.getBalance();
-    const count = this.computePositionSize(balanceCents, askPriceCents);
+    // Pass edge for dynamic sizing: higher edge → larger position (capped at maxPositionSize).
+    const count = this.computePositionSize(balanceCents, askPriceCents, edge);
 
     if (count < 1) {
       return this.hold(
@@ -1162,6 +1284,66 @@ export class ArbStrategy {
       logger.error('Failed to place Kalshi MARKET EXIT order', { error: msg, side, count });
       return this.hold(`Market exit placement failed: ${msg}`);
     }
+  }
+
+  /**
+   * Checks TP, SL, and TTE-based exits. Returns an exit result if we should close,
+   * null if position should be held or there's nothing to do.
+   * Called before cross detection so exits fire on every tick.
+   */
+  private async checkProfitAndLossExits(
+    market: KalshiMarket,
+    coinbasePrice: number,
+    positionContracts: number,
+    targetPriceDollars: number,
+    secsLeft: number,
+  ): Promise<EvaluationResult | null> {
+    const isLong = positionContracts > 0;
+    const isShort = positionContracts < 0;
+    if (!isLong && !isShort) return null;
+    if (this.pendingPhase) return null;
+    if (this.currentTradeEntryLimitCents === null) return null;
+
+    const heldSide: 'yes' | 'no' = isLong ? 'yes' : 'no';
+    const bid = heldSide === 'yes' ? market.yes_bid : market.no_bid;
+    const entry = this.currentTradeEntryLimitCents;
+    const count = Math.abs(positionContracts);
+    const pnlCents = bid - entry;
+
+    // Take profit: Kalshi has repriced in our favor by takeProfitCents.
+    if (pnlCents >= config.strategy.takeProfitCents) {
+      logger.info('TAKE PROFIT triggered', { heldSide, bid, entry, pnlCents });
+      return await this.placeMarketExitOrder(market, heldSide, count);
+    }
+
+    // Stop loss: underwater by stopLossCents at any time.
+    if (pnlCents <= -config.strategy.stopLossCents) {
+      logger.info('STOP LOSS triggered', { heldSide, bid, entry, pnlCents });
+      return await this.placeMarketExitOrder(market, heldSide, count);
+    }
+
+    // Near expiry (<3 min): hold if winning, cut if losing.
+    if (secsLeft < 180) {
+      const btcAboveStrike = coinbasePrice > targetPriceDollars;
+      const positionIsWinning = (isLong && btcAboveStrike) || (isShort && !btcAboveStrike);
+
+      if (!positionIsWinning && pnlCents < -3) {
+        logger.info('Near-expiry cut-loss triggered', { secsLeft: secsLeft.toFixed(0), heldSide, btcAboveStrike, pnlCents });
+        return await this.placeMarketExitOrder(market, heldSide, count);
+      }
+      if (positionIsWinning) {
+        // Hold to expiry — let theta work for us.
+        return this.hold(`Near expiry, holding winner (${secsLeft.toFixed(0)}s left, ${pnlCents >= 0 ? '+' : ''}${pnlCents}c)`);
+      }
+    }
+
+    // Thesis failure: still losing with <5 min left.
+    if (secsLeft < 300 && pnlCents < -5) {
+      logger.info('Thesis-failure exit triggered', { secsLeft: secsLeft.toFixed(0), pnlCents });
+      return await this.placeMarketExitOrder(market, heldSide, count);
+    }
+
+    return null;
   }
 
   private hold(reason: string): EvaluationResult {
