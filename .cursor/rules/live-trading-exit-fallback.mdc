@@ -1,0 +1,27 @@
+---
+description: Live trading — fallback from unfilled exit limits to market sells until flat
+globs: src/strategy/**/*.ts,src/kalshi/**/*.ts,src/config.ts,src/botRunner.ts
+alwaysApply: false
+---
+
+# Live trading: exit limit → market until filled
+
+When `config.dryRun` is **false** (live mode), exiting a position must not stall indefinitely on resting limit sells.
+
+## Required behavior
+
+1. **Start with limit exits** as today (`placeExitOrder` in `arbStrategy.ts`): prefer price improvement when the book allows fills.
+2. **While `pendingPhase === 'exit'`** and exposure is non-zero, if the exit limit is **not** fully filled within a bounded wait (e.g. `EXIT_WAIT_TIMEOUT_MS` or a dedicated “limit grace” window), **do not** only cancel and `HOLD` if the product requirement is guaranteed flattening.
+3. **Escalation**: cancel the unfilled limit exit when appropriate, then place **market** sell orders for the **remaining** contract count (same `side` / `action: 'sell'` as the exit leg). Re-read **`getPositions()`** (or order/fill APIs if you add them) each cycle until **`positionContracts === 0`** for that ticker.
+4. **Loop until flat**: repeat market slices only if needed (partial fills, API errors); stop when position is flat or you hit an explicit safety cap (log + alarm), never silent infinite loops.
+5. **Demo / dry-run**: keep simulated behavior consistent, or explicitly no-op market fallback if Kalshi market orders are live-only—document the branch.
+
+## Implementation notes
+
+- **Source of truth for “filled”**: net position from `getPositions()` is already used in `evaluate()`; prefer that over assuming an order ID fully cleared.
+- **Types / API**: `KalshiOrderRequest` currently types `type` as `'limit'` only; live market exits require extending the request type and `KalshiClient.placeOrder` body per [Kalshi trade API](https://docs.kalshi.com/) (omit or set price fields as the API requires for market sells).
+- **Rate / duplication**: respect `canPlaceNewOrder` / `lastOrderTime` and avoid stacking duplicate market exits for the same residual size in one tick without checking positions.
+
+## Anti-pattern (current baseline to replace for live)
+
+In the pending-exit branch, timing out after `exitWaitTimeoutMs` and returning `HOLD` while still holding contracts leaves risk on — for live trading, that path should transition to **market completion** (or a clearly named emergency flatten) instead of abandoning the exit.

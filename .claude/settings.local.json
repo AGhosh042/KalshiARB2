@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Read(//usr/local/bin/**)",
+      "Read(//opt/homebrew/**)",
+      "Read(//Users/ayushghosh/.nvm/versions/**)",
+      "Read(//Users/ayushghosh/**)",
+      "Bash(export:*)",
+      "WebFetch(domain:trading-api.readme.io)",
+      "WebFetch(domain:docs.kalshi.com)",
+      "WebSearch",
+      "WebFetch(domain:help.kalshi.com)",
+      "WebFetch(domain:medium.com)",
+      "WebFetch(domain:zuplo.com)",
+      "Bash(npm run:*)",
+      "Bash(npx tsx:*)",
+      "Bash(node:*)",
+      "WebFetch(domain:kalshi.com)",
+      "Bash(pkill -f \"tsx src\")",
+      "Bash(kill 38797)"
+    ]
+  }
+}

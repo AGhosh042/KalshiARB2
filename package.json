@@ -1,0 +1,29 @@
+{
+  "name": "kalshi-arb",
+  "version": "1.0.0",
+  "description": "Kalshi BTC 15-min latency arbitrage bot using Coinbase real-time price feed",
+  "main": "src/index.ts",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dashboard": "tsx src/dashboardServer.ts",
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "set-market": "node scripts/set-market.mjs",
+    "up": "concurrently --names \"bot,dash\" --prefix-colors \"cyan,yellow\" \"npm:start\" \"npm:dashboard\""
+  },
+  "dependencies": {
+    "axios": "^1.6.8",
+    "dotenv": "^16.4.5",
+    "express": "^5.2.1",
+    "winston": "^3.13.0",
+    "ws": "^8.17.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^20.12.12",
+    "@types/ws": "^8.5.10",
+    "concurrently": "^9.2.1",
+    "tsx": "^4.11.0",
+    "typescript": "^5.4.5"
+  }
+}
