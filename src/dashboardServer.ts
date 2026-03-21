@@ -432,7 +432,7 @@ app.get('/', (_req, res) => {
 
       seedDemoInputsFromLiveMarket();
       refresh();
-      setInterval(refresh, 1500);
+      setInterval(refresh, 2000);
     </script>
   </body>
 </html>`);

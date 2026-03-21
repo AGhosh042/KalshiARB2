@@ -757,6 +757,9 @@ export class BotRunner {
         }
 
         this.latestMarket = market;
+        // Throttle the fetch loop — Basic tier allows 20 reads/sec.
+        // 200ms = 5 req/sec from bot, leaving headroom for dashboard + order writes.
+        await new Promise((resolve) => setTimeout(resolve, config.strategy.pollIntervalMs));
       } catch (err) {
         if (this.isNotFoundMarketError(err)) {
           const recovered = await this.recoverLiveTickerOn404();
