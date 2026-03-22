@@ -785,8 +785,10 @@ export class ArbStrategy {
           return this.hold(`Displacement ${displacementPct.toFixed(3)}% < threshold ${config.strategy.displacementThresholdPct}% — noise cross, skipping`);
         }
         // Momentum gate: fast EMA must be above slow EMA (upward momentum confirmed).
-        if (this.ema5s !== null && this.ema20s !== null && this.ema5s <= this.ema20s) {
-          return this.hold(`Momentum not confirmed for YES: ema5s=${this.ema5s.toFixed(2)} <= ema20s=${this.ema20s.toFixed(2)}`);
+        // Skip gate if EMAs haven't warmed up yet (ema5s === ema20s at seed time).
+        const emasWarmedUp = this.ema5s !== null && this.ema20s !== null && Math.abs(this.ema5s - this.ema20s) > 0.01;
+        if (emasWarmedUp && this.ema5s! <= this.ema20s!) {
+          return this.hold(`Momentum not confirmed for YES: ema5s=${this.ema5s!.toFixed(2)} <= ema20s=${this.ema20s!.toFixed(2)}`);
         }
         // Spread gate: skip if Kalshi spread is too wide (illiquid market).
         const yesSpread = market.yes_ask - market.yes_bid;
@@ -816,8 +818,10 @@ export class ArbStrategy {
           return this.hold(`Displacement ${displacementPct.toFixed(3)}% < threshold ${config.strategy.displacementThresholdPct}% — noise cross, skipping`);
         }
         // Momentum gate: fast EMA must be below slow EMA (downward momentum confirmed).
-        if (this.ema5s !== null && this.ema20s !== null && this.ema5s >= this.ema20s) {
-          return this.hold(`Momentum not confirmed for NO: ema5s=${this.ema5s.toFixed(2)} >= ema20s=${this.ema20s.toFixed(2)}`);
+        // Skip gate if EMAs haven't warmed up yet (ema5s === ema20s at seed time).
+        const emasWarmedUp = this.ema5s !== null && this.ema20s !== null && Math.abs(this.ema5s - this.ema20s) > 0.01;
+        if (emasWarmedUp && this.ema5s! >= this.ema20s!) {
+          return this.hold(`Momentum not confirmed for NO: ema5s=${this.ema5s!.toFixed(2)} >= ema20s=${this.ema20s!.toFixed(2)}`);
         }
         // Spread gate: skip if Kalshi spread is too wide (illiquid market).
         const noSpread = market.no_ask - market.no_bid;

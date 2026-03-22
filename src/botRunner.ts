@@ -385,8 +385,12 @@ export class BotRunner {
       if (this.isEvaluating) return;
       this.isEvaluating = true;
       try {
-        const underlying = market.last_price_dollars ?? null;
+        // Dashboard reference: use the fixed strike price (expiration_value_dollars),
+        // which is what the strategy actually compares coinbase against.
+        // last_price_dollars is a synthetic EMA and produces a nearly-zero diff,
+        // making the dashboard misleading. The strike diff is what determines trades.
         const target = market.expiration_value_dollars ?? null;
+        const underlying = target;  // strike is the "underlying" reference for display
         const coinbasePrice = coinbaseData.price;
 
         if (underlying !== null && !Number.isNaN(underlying)) {
