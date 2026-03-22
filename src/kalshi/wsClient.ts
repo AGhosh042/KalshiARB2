@@ -28,16 +28,18 @@ export declare interface KalshiWsClient {
 }
 
 interface TickerMsg {
-  yes_bid?: number;
-  yes_ask?: number;
-  no_bid?: number;
-  no_ask?: number;
+  // WS ticker sends dollar-denominated prices (NOT cents like REST API)
+  yes_bid_dollars?: number;
+  yes_ask_dollars?: number;
+  no_bid_dollars?: number;
+  no_ask_dollars?: number;
+  // WS also sends underlying BTC price and strike directly
+  underlying_price?: number;        // live Kalshi BTC index (dollars)
+  expiration_value?: string | number; // market strike price (dollars or string like "$85,000")
   volume?: number;
   open_interest?: number;
   status?: string;
   close_time?: string;
-  last_price?: number;
-  expiration_value?: string;
   market_ticker?: string;
   [key: string]: unknown;
 }
@@ -57,11 +59,19 @@ export class KalshiWsClient extends EventEmitter {
   private readonly apiKeyId: string;
   private readonly privateKey: crypto.KeyObject | null;
 
-  constructor(marketTicker: string, privateKey: crypto.KeyObject | null, apiKeyId: string) {
+  constructor(
+    marketTicker: string,
+    privateKey: crypto.KeyObject | null,
+    apiKeyId: string,
+    seedMarket?: KalshiMarket,
+  ) {
     super();
     this.marketTicker = marketTicker;
     this.privateKey = privateKey;
     this.apiKeyId = apiKeyId;
+    // Pre-populate with REST data so expiration_value_dollars is available
+    // immediately (WS ticker ticks may not include it on every message).
+    this.latestMarket = seedMarket ?? null;
   }
 
   /** Build auth headers for the WS handshake (same signing as REST). */
@@ -204,19 +214,30 @@ export class KalshiWsClient extends EventEmitter {
   private patchAndEmit(tick: TickerMsg): void {
     const ticker = (tick.market_ticker as string | undefined) ?? this.marketTicker;
 
+    // WS ticker sends prices in dollars (yes_bid_dollars etc.), not cents like REST.
+    // Convert back to cents for KalshiMarket (which uses cent-denominated prices throughout).
+    const toBidAskCents = (dollars: number | undefined, fallback: number): number => {
+      if (dollars != null && !isNaN(dollars)) return Math.round(dollars * 100);
+      return fallback;
+    };
+
     // Build or patch the market state from the tick.
     const prev = this.latestMarket;
     const market: KalshiMarket = {
       ticker,
-      yes_bid:  (tick.yes_bid  ?? prev?.yes_bid  ?? 0),
-      yes_ask:  (tick.yes_ask  ?? prev?.yes_ask  ?? 0),
-      no_bid:   (tick.no_bid   ?? prev?.no_bid   ?? 0),
-      no_ask:   (tick.no_ask   ?? prev?.no_ask   ?? 0),
-      volume:   (tick.volume   ?? prev?.volume   ?? 0),
-      open_interest: (tick.open_interest ?? prev?.open_interest ?? 0),
+      yes_bid: toBidAskCents(tick.yes_bid_dollars, prev?.yes_bid ?? 0),
+      yes_ask: toBidAskCents(tick.yes_ask_dollars, prev?.yes_ask ?? 0),
+      no_bid:  toBidAskCents(tick.no_bid_dollars,  prev?.no_bid  ?? 0),
+      no_ask:  toBidAskCents(tick.no_ask_dollars,  prev?.no_ask  ?? 0),
+      volume:        tick.volume        ?? prev?.volume        ?? 0,
+      open_interest: tick.open_interest ?? prev?.open_interest ?? 0,
       status:   ((tick.status ?? prev?.status ?? 'open') as KalshiMarket['status']),
       close_time: (tick.close_time as string | undefined) ?? prev?.close_time ?? '',
-      last_price_dollars: tick.last_price != null ? tick.last_price / 100 : prev?.last_price_dollars,
+      // underlying_price = live Kalshi BTC index in dollars (what the dashboard shows as "Kalshi price")
+      last_price_dollars: tick.underlying_price != null && !isNaN(tick.underlying_price)
+        ? tick.underlying_price
+        : prev?.last_price_dollars,
+      // expiration_value = the strike price in dollars for this contract
       expiration_value_dollars: (() => {
         if (tick.expiration_value != null) {
           const parsed = parseFloat(String(tick.expiration_value).replace(/[^0-9.]/g, ''));

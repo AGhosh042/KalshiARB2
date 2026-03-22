@@ -461,6 +461,23 @@ export class BotRunner {
       // Auto-discover the current open market before connecting WS.
       await this.initializeMarketTicker();
 
+      // Seed latestMarket from REST before connecting WS.
+      // The WS ticker channel may not send expiration_value on every tick (only on snapshot/lifecycle).
+      // Without a seed, strategy.evaluate() returns hold('Kalshi expiration_value unavailable') forever.
+      try {
+        this.latestMarket = await this.kalshiClient!.getMarket(this.currentMarketTicker);
+        logger.info('Seeded Kalshi market data from REST', {
+          ticker: this.currentMarketTicker,
+          expiration_value_dollars: this.latestMarket.expiration_value_dollars,
+          yes_bid: this.latestMarket.yes_bid,
+          yes_ask: this.latestMarket.yes_ask,
+        });
+      } catch (err) {
+        logger.warn('Could not seed market data from REST — WS will populate on first tick', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+
       // Start the Kalshi WebSocket feed — real-time push, no REST polling, no rate limit usage.
       this.startKalshiWsFeed();
     } else {
@@ -713,6 +730,7 @@ export class BotRunner {
       this.currentMarketTicker,
       this.kalshiClient?.privateKey ?? null,
       this.kalshiClient?.apiKeyId ?? '',
+      this.latestMarket ?? undefined,  // seed with REST data so expiration_value_dollars survives ticks that omit it
     );
 
     this.kalshiWsClient.on('market', (market) => {
