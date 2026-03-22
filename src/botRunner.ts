@@ -709,9 +709,11 @@ export class BotRunner {
   private startKalshiWsFeed(): void {
     if (!this.kalshiClient) return;
 
-    // Extract private key from KalshiClient for WS auth — access via a getter we'll add.
-    // For now, pass null (ticker channel is public — no auth needed for market data).
-    this.kalshiWsClient = new KalshiWsClient(this.currentMarketTicker, null, '');
+    this.kalshiWsClient = new KalshiWsClient(
+      this.currentMarketTicker,
+      this.kalshiClient?.privateKey ?? null,
+      this.kalshiClient?.apiKeyId ?? '',
+    );
 
     this.kalshiWsClient.on('market', (market) => {
       this.latestMarket = market;

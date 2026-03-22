@@ -18,8 +18,8 @@ import { buildKalshiMarketFromRaw } from './marketNormalize.js';
 
 export class KalshiClient {
   private readonly http: AxiosInstance;
-  private readonly apiKeyId: string;
-  private readonly privateKey: crypto.KeyObject | null;
+  readonly apiKeyId: string;
+  readonly privateKey: crypto.KeyObject | null;
 
   constructor() {
     this.apiKeyId = config.kalshi.apiKeyId;
