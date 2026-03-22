@@ -65,6 +65,8 @@ export class ArbStrategy {
   // alpha5 ≈ fast (tracks last ~5 ticks), alpha20 ≈ slow (tracks last ~20 ticks).
   private ema5s: number | null = null;
   private ema20s: number | null = null;
+  private prevEma5s: number | null = null;   // EMA5 from the previous tick — used for cross detection
+  private prevEma20s: number | null = null;  // EMA20 from the previous tick — used for cross detection
   private static readonly EMA5_ALPHA = 2 / (5 + 1);   // 0.333
   private static readonly EMA20_ALPHA = 2 / (20 + 1);  // 0.095
 
@@ -335,6 +337,8 @@ export class ArbStrategy {
       // Reset EMAs and regime filter for the new market.
       this.ema5s = null;
       this.ema20s = null;
+      this.prevEma5s = null;
+      this.prevEma20s = null;
       this.crossTimestamps = [];
       this.regimePausedUntilMs = 0;
     }
@@ -432,6 +436,9 @@ export class ArbStrategy {
     this.lastEvaluatedCoinbasePrice = coinbasePrice;
 
     // Update momentum EMAs on every tick.
+    // Save previous values BEFORE updating so cross detection can compare prev vs current.
+    this.prevEma5s = this.ema5s;
+    this.prevEma20s = this.ema20s;
     if (this.ema5s === null || this.ema20s === null) {
       this.ema5s = coinbasePrice;
       this.ema20s = coinbasePrice;
@@ -696,30 +703,45 @@ export class ArbStrategy {
     const tpslExit = await this.checkProfitAndLossExits(market, coinbasePrice, positionContracts, targetPriceDollars, secsLeft);
     if (tpslExit) return tpslExit;
 
-    // --- Need a previous tick to detect intersections ---
-    if (prevPrice === null || prevKalshiUnderlyingPriceDollars === null) {
+    // --- Need a previous tick to detect EMA crossovers ---
+    if (prevPrice === null || this.prevEma5s === null || this.prevEma20s === null) {
       if (isLong) {
         this.peakCoinbase = coinbasePrice;
       } else if (isShort) {
         this.troughCoinbase = coinbasePrice;
       }
-      return this.hold('Waiting for first Coinbase tick');
+      return this.hold('Waiting for EMA warmup (need 2+ ticks)');
     }
     const rising = coinbasePrice > prevPrice;
     const falling = coinbasePrice < prevPrice;
 
-    // Intersection between Coinbase BTC spot and Kalshi live underlying BTC price.
-    // Detect by sign change of diff = coinbase - underlying across consecutive ticks.
-    // NOTE: do NOT gate on `rising`/`falling` — a cross is purely a sign change in the diff.
-    // The Kalshi underlying can move into Coinbase (or vice versa) regardless of Coinbase's
-    // tick-to-tick direction, and requiring directional agreement caused real crosses to be missed.
-    const prevDiff = prevPrice - prevKalshiUnderlyingPriceDollars;
-    const currDiff = coinbasePrice - kalshiUnderlyingPriceDollars;
-    const crossUp = prevDiff < 0 && currDiff >= 0;
-    const crossDown = prevDiff > 0 && currDiff <= 0;
+    // -----------------------------------------------------------------------
+    // SIGNAL: EMA5 / EMA20 crossover on Coinbase price.
+    //
+    // Strategy: Coinbase leads Kalshi by a small latency (~1-5 seconds).
+    // When Coinbase flips from downtrend to uptrend (EMA5 crosses above EMA20),
+    // Kalshi contracts haven't repriced yet — YES contracts are cheap. Buy YES.
+    // Reverse for downtrend flip → buy NO.
+    //
+    // crossUp  = EMA5 was below EMA20 last tick, now at or above → bullish flip
+    // crossDown = EMA5 was above EMA20 last tick, now at or below → bearish flip
+    // -----------------------------------------------------------------------
+    const crossUp   = this.prevEma5s < this.prevEma20s && this.ema5s! >= this.ema20s!;
+    const crossDown = this.prevEma5s > this.prevEma20s && this.ema5s! <= this.ema20s!;
 
+    // Dashboard: show coinbase vs kalshi underlying diff (informational only, not used for signal)
+    const currDiff = coinbasePrice - kalshiUnderlyingPriceDollars;
     this.lastCoinbaseMinusUnderlyingDollars = currDiff;
     this.lastCoinbaseDirection = rising ? 'up' : falling ? 'down' : 'flat';
+
+    logger.debug('EMA cross check', {
+      ema5s: this.ema5s!.toFixed(2),
+      ema20s: this.ema20s!.toFixed(2),
+      prevEma5s: this.prevEma5s.toFixed(2),
+      prevEma20s: this.prevEma20s.toFixed(2),
+      crossUp,
+      crossDown,
+    });
 
     if (crossUp) {
       this.lastCrossDirection = 'up';
@@ -763,10 +785,7 @@ export class ArbStrategy {
     logger.debug('Cross detection', {
       prevPrice: prevPrice.toFixed(2),
       currPrice: coinbasePrice.toFixed(2),
-      prevKalshiUnderlyingPrice: prevKalshiUnderlyingPriceDollars.toFixed(2),
       kalshiUnderlyingPrice: kalshiUnderlyingPriceDollars.toFixed(2),
-      prevDiff: prevDiff.toFixed(2),
-      currDiff: currDiff.toFixed(2),
       crossUp,
       crossDown,
       rising,
@@ -776,20 +795,11 @@ export class ArbStrategy {
       troughCoinbase: this.troughCoinbase,
     });
 
-    // --- Flat: enter based on cross direction ---
+    // --- Flat: enter based on EMA crossover direction ---
     if (isFlat) {
       if (crossUp) {
-        // Displacement gate: BTC must be meaningfully past strike, not just touching it.
-        const displacementPct = Math.abs(coinbasePrice - targetPriceDollars) / targetPriceDollars * 100;
-        if (displacementPct < config.strategy.displacementThresholdPct) {
-          return this.hold(`Displacement ${displacementPct.toFixed(3)}% < threshold ${config.strategy.displacementThresholdPct}% — noise cross, skipping`);
-        }
-        // Momentum gate: fast EMA must be above slow EMA (upward momentum confirmed).
-        // Skip gate if EMAs haven't warmed up yet (ema5s === ema20s at seed time).
-        const emasWarmedUp = this.ema5s !== null && this.ema20s !== null && Math.abs(this.ema5s - this.ema20s) > 0.01;
-        if (emasWarmedUp && this.ema5s! <= this.ema20s!) {
-          return this.hold(`Momentum not confirmed for YES: ema5s=${this.ema5s!.toFixed(2)} <= ema20s=${this.ema20s!.toFixed(2)}`);
-        }
+        // EMA5 crossed above EMA20 → Coinbase just flipped bullish.
+        // Kalshi is lagging — YES contracts still cheap. Enter long.
         // Spread gate: skip if Kalshi spread is too wide (illiquid market).
         const yesSpread = market.yes_ask - market.yes_bid;
         if (yesSpread > 8) {
@@ -812,17 +822,8 @@ export class ArbStrategy {
         };
       }
       if (crossDown) {
-        // Displacement gate: BTC must be meaningfully past strike, not just touching it.
-        const displacementPct = Math.abs(coinbasePrice - targetPriceDollars) / targetPriceDollars * 100;
-        if (displacementPct < config.strategy.displacementThresholdPct) {
-          return this.hold(`Displacement ${displacementPct.toFixed(3)}% < threshold ${config.strategy.displacementThresholdPct}% — noise cross, skipping`);
-        }
-        // Momentum gate: fast EMA must be below slow EMA (downward momentum confirmed).
-        // Skip gate if EMAs haven't warmed up yet (ema5s === ema20s at seed time).
-        const emasWarmedUp = this.ema5s !== null && this.ema20s !== null && Math.abs(this.ema5s - this.ema20s) > 0.01;
-        if (emasWarmedUp && this.ema5s! >= this.ema20s!) {
-          return this.hold(`Momentum not confirmed for NO: ema5s=${this.ema5s!.toFixed(2)} >= ema20s=${this.ema20s!.toFixed(2)}`);
-        }
+        // EMA5 crossed below EMA20 → Coinbase just flipped bearish.
+        // Kalshi is lagging — NO contracts still cheap. Enter short.
         // Spread gate: skip if Kalshi spread is too wide (illiquid market).
         const noSpread = market.no_ask - market.no_bid;
         if (noSpread > 8) {

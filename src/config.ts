@@ -135,9 +135,9 @@ function loadConfig(): Config {
       // 45s cooldown prevents churn in choppy markets around the strike.
       orderCooldownMs: getEnvNumber('ORDER_COOLDOWN_MS', 45_000),
       // Don't trade in the last 3 minutes — Kalshi has already repriced, lag is gone.
-      minSecondsBeforeExpiry: getEnvNumber('MIN_SECONDS_BEFORE_EXPIRY', 60),
+      minSecondsBeforeExpiry: getEnvNumber('MIN_SECONDS_BEFORE_EXPIRY', 45),
       // Don't trade with more than 12 minutes left — too much uncertainty, signal is weak.
-      maxSecondsBeforeExpiry: getEnvNumber('MAX_SECONDS_BEFORE_EXPIRY', 840),
+      maxSecondsBeforeExpiry: getEnvNumber('MAX_SECONDS_BEFORE_EXPIRY', 870),
       // BTC must be at least 0.15% past the strike to enter — filters noise crosses.
       displacementThresholdPct: getEnvNumber('DISPLACEMENT_THRESHOLD_PCT', 0.15),
       // Take profit when position is +10c in our favor (Kalshi has repriced).
