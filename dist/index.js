@@ -35,6 +35,9 @@ async function main() {
     let fetchLoopActive = true;
     let balanceLogTimer = null;
     let statusTimer = null;
+    // BUG-M3: Guard timers — only run balance/status checks after both Kalshi and Coinbase are ready.
+    let coinbaseConnected = false;
+    let kalshiReady = false;
     // Cached state for the periodic status display (avoids extra API calls on every tick).
     let cachedBalanceCents = 0;
     let cachedPositionContracts = 0;
@@ -96,6 +99,7 @@ async function main() {
     }
     // Wire Coinbase price updates directly to evaluation — no timer involved.
     coinbaseClient.on('priceUpdate', (data) => {
+        coinbaseConnected = true;
         void evaluateOnTick(data);
     });
     // Kalshi market fetch loop — runs as fast as the REST API allows, completely
@@ -136,6 +140,7 @@ async function main() {
                     // Best-effort; ignore rotation failures.
                 }
                 latestMarket = market;
+                kalshiReady = true;
             }
             catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
@@ -257,11 +262,16 @@ async function main() {
             ticker: currentMarketTicker,
         });
     }
-    // Log balance immediately at startup, then every 60s
-    void logBalance();
-    balanceLogTimer = setInterval(() => void logBalance(), 60_000);
-    // Status display every 2 seconds
-    statusTimer = setInterval(() => void logStatus(), 2_000);
+    // BUG-M3: Don't fire balance/status before connections are ready — calling
+    // Kalshi REST at startup before auth is initialized causes spurious errors.
+    balanceLogTimer = setInterval(() => {
+        if (coinbaseConnected && kalshiReady)
+            void logBalance();
+    }, 60_000);
+    statusTimer = setInterval(() => {
+        if (coinbaseConnected && kalshiReady)
+            void logStatus();
+    }, 2_000);
     // Auto-discover the current open market before starting — never rely on a stale .env ticker.
     try {
         const prefix = currentMarketTicker.split('-')[0].toUpperCase();

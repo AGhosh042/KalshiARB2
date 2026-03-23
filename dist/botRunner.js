@@ -8,6 +8,7 @@ const config_js_1 = require("./config.js");
 const logger_js_1 = __importDefault(require("./utils/logger.js"));
 const client_js_1 = require("./coinbase/client.js");
 const client_js_2 = require("./kalshi/client.js");
+const wsClient_js_1 = require("./kalshi/wsClient.js");
 const arbStrategy_js_1 = require("./strategy/arbStrategy.js");
 class BotRunner {
     coinbaseClient = null;
@@ -157,6 +158,7 @@ class BotRunner {
     isEvaluating = false;
     latestMarket = null;
     kalshiFetchLoopActive = false;
+    kalshiWsClient = null;
     state = null;
     trades = [];
     startBalanceCents = 0;
@@ -278,8 +280,12 @@ class BotRunner {
                 return;
             this.isEvaluating = true;
             try {
-                const underlying = market.last_price_dollars ?? null;
+                // Dashboard reference: use the fixed strike price (expiration_value_dollars),
+                // which is what the strategy actually compares coinbase against.
+                // last_price_dollars is a synthetic EMA and produces a nearly-zero diff,
+                // making the dashboard misleading. The strike diff is what determines trades.
                 const target = market.expiration_value_dollars ?? null;
+                const underlying = target; // strike is the "underlying" reference for display
                 const coinbasePrice = coinbaseData.price;
                 if (underlying !== null && !Number.isNaN(underlying)) {
                     this.lastKalshiUnderlyingPriceDollars = underlying;
@@ -341,16 +347,41 @@ class BotRunner {
                 }
                 // Evaluate immediately on every Coinbase tick using the latest cached Kalshi market.
                 if (this.latestMarket) {
+                    // Warn if Kalshi underlying price is stale (>30s without a WS tick).
+                    const underlyingAgeMs = this.lastKalshiUnderlyingUpdateAtMs
+                        ? Date.now() - this.lastKalshiUnderlyingUpdateAtMs
+                        : null;
+                    if (underlyingAgeMs !== null && underlyingAgeMs > 30_000) {
+                        logger_js_1.default.warn('Kalshi underlying price is stale — WS may not be pushing ticks', {
+                            staleSec: (underlyingAgeMs / 1000).toFixed(0),
+                            lastKnownUnderlying: this.lastKalshiUnderlyingPriceDollars,
+                        });
+                    }
                     void evaluateWithMarket(data, this.latestMarket);
                 }
             });
             this.coinbaseClient.connect();
-            // Auto-discover the current open market before starting the fetch loop.
-            // This means the user never needs to keep KALSHI_MARKET_TICKER up to date.
+            // Auto-discover the current open market before connecting WS.
             await this.initializeMarketTicker();
-            // Start the Kalshi fetch loop independently — it runs as fast as the REST API allows.
-            this.kalshiFetchLoopActive = true;
-            void this.runKalshiFetchLoop();
+            // Seed latestMarket from REST before connecting WS.
+            // The WS ticker channel may not send expiration_value on every tick (only on snapshot/lifecycle).
+            // Without a seed, strategy.evaluate() returns hold('Kalshi expiration_value unavailable') forever.
+            try {
+                this.latestMarket = await this.kalshiClient.getMarket(this.currentMarketTicker);
+                logger_js_1.default.info('Seeded Kalshi market data from REST', {
+                    ticker: this.currentMarketTicker,
+                    expiration_value_dollars: this.latestMarket.expiration_value_dollars,
+                    yes_bid: this.latestMarket.yes_bid,
+                    yes_ask: this.latestMarket.yes_ask,
+                });
+            }
+            catch (err) {
+                logger_js_1.default.warn('Could not seed market data from REST — WS will populate on first tick', {
+                    error: err instanceof Error ? err.message : String(err),
+                });
+            }
+            // Start the Kalshi WebSocket feed — real-time push, no REST polling, no rate limit usage.
+            this.startKalshiWsFeed();
         }
         else {
             // Demo mode: synthetic Coinbase price series so the UI never stays blank.
@@ -569,77 +600,74 @@ class BotRunner {
             });
         }
     }
-    /** Kalshi market fetch loop for live mode — runs as fast as the REST API allows. */
-    async runKalshiFetchLoop() {
-        while (this.kalshiFetchLoopActive) {
-            if (!this.kalshiClient)
-                break;
-            try {
-                let market = await this.kalshiClient.getMarket(this.currentMarketTicker);
-                // Auto-rotate market ticker close to expiry.
-                try {
-                    const closeMs = new Date(market.close_time).getTime();
-                    const shouldRotate = market.status !== 'open' || closeMs - Date.now() <= 10_000;
-                    const isPending = (this.strategy?.getPendingPhase() ?? null) !== null &&
-                        (this.strategy?.getPendingSide() ?? null) !== null;
-                    if (shouldRotate && !isPending) {
-                        const positions = await this.kalshiClient.getPositions();
-                        const positionContracts = positions.find((p) => p.ticker === this.currentMarketTicker)?.position ?? 0;
-                        if (positionContracts === 0) {
-                            // Ask the API for the next open market — never compute ticker names manually
-                            // because the format (e.g. KXBTC15M-26MAR201800-00) is not officially documented.
-                            const prefix = this.currentMarketTicker.split('-')[0];
-                            const seriesTicker = prefix.toUpperCase();
-                            const openMarkets = await this.kalshiClient.getMarkets({
-                                seriesTicker,
-                                status: 'open',
-                                limit: 100,
-                            });
-                            const now = Date.now();
-                            const next = openMarkets
-                                .filter((m) => m.ticker && m.close_time && new Date(m.close_time).getTime() >= now)
-                                .sort((a, b) => new Date(a.close_time).getTime() - new Date(b.close_time).getTime())[0];
-                            if (next && next.ticker !== this.currentMarketTicker) {
-                                logger_js_1.default.info('Auto-rotating market ticker', {
-                                    from: this.currentMarketTicker,
-                                    to: next.ticker,
-                                    closeTime: next.close_time,
-                                });
-                                this.currentMarketTicker = next.ticker;
-                                if (this.state)
-                                    this.state.marketTicker = next.ticker;
-                                market = next;
-                            }
-                        }
-                    }
-                }
-                catch {
-                    // Best-effort; ignore rotation failures.
-                }
-                this.latestMarket = market;
+    /** Start real-time Kalshi market data via WebSocket (replaces REST polling loop). */
+    startKalshiWsFeed() {
+        if (!this.kalshiClient)
+            return;
+        this.kalshiWsClient = new wsClient_js_1.KalshiWsClient(this.currentMarketTicker, this.kalshiClient?.privateKey ?? null, this.kalshiClient?.apiKeyId ?? '', this.latestMarket ?? undefined);
+        this.kalshiWsClient.on('market', (market) => {
+            this.latestMarket = market;
+            // Auto-rotate if the market just closed and we have no position.
+            const closeMs = new Date(market.close_time || 0).getTime();
+            const shouldRotate = market.status !== 'open' || (closeMs > 0 && closeMs - Date.now() <= 10_000);
+            const isPending = (this.strategy?.getPendingPhase() ?? null) !== null;
+            if (shouldRotate && !isPending) {
+                void this.tryRotateMarketTicker();
             }
-            catch (err) {
-                if (this.isNotFoundMarketError(err)) {
-                    const recovered = await this.recoverLiveTickerOn404();
-                    if (recovered) {
-                        this.latestMarket = recovered;
-                    }
-                    else {
-                        // No open market found in this series — back off before retrying.
-                        logger_js_1.default.warn('No open Kalshi market found for series — check KALSHI_MARKET_TICKER in .env or wait for next rotation', {
-                            ticker: this.currentMarketTicker,
-                        });
-                        await new Promise((resolve) => setTimeout(resolve, 5000));
-                    }
-                }
-                else {
-                    logger_js_1.default.warn('Failed to fetch Kalshi market — retrying', {
-                        error: err instanceof Error ? err.message : String(err),
-                    });
-                    // Back off on errors to avoid hammering the API (CPU spin + rate limit risk).
-                    await new Promise((resolve) => setTimeout(resolve, 1000));
-                }
+        });
+        this.kalshiWsClient.on('connected', () => {
+            logger_js_1.default.info('Kalshi WebSocket feed connected — real-time market data active');
+        });
+        this.kalshiWsClient.on('disconnected', (code, reason) => {
+            logger_js_1.default.warn('Kalshi WebSocket disconnected — reconnecting automatically', { code, reason });
+        });
+        this.kalshiWsClient.on('error', (err) => {
+            logger_js_1.default.error('Kalshi WebSocket error', { error: err.message });
+        });
+        this.kalshiWsClient.connect();
+    }
+    // BUG-I2: Debounce rotation checks — runs on every WS tick without this guard,
+    // which fires 100+ concurrent REST calls racing on this.currentMarketTicker.
+    lastRotationCheckMs = 0;
+    /** Auto-rotate to the next open market (called when current market is near/past close). */
+    async tryRotateMarketTicker() {
+        if (!this.kalshiClient)
+            return;
+        // Debounce: skip if we checked less than 10s ago.
+        if (Date.now() - this.lastRotationCheckMs < 10_000)
+            return;
+        this.lastRotationCheckMs = Date.now();
+        try {
+            const positions = await this.kalshiClient.getPositions();
+            const positionContracts = positions.find((p) => p.ticker === this.currentMarketTicker)?.position ?? 0;
+            if (positionContracts !== 0)
+                return; // Don't rotate while holding a position.
+            const prefix = this.currentMarketTicker.split('-')[0];
+            const seriesTicker = prefix.toUpperCase();
+            const openMarkets = await this.kalshiClient.getMarkets({
+                seriesTicker,
+                status: 'open',
+                limit: 100,
+            });
+            const now = Date.now();
+            const next = openMarkets
+                .filter((m) => m.ticker && m.close_time && new Date(m.close_time).getTime() >= now)
+                .sort((a, b) => new Date(a.close_time).getTime() - new Date(b.close_time).getTime())[0];
+            if (next && next.ticker !== this.currentMarketTicker) {
+                logger_js_1.default.info('Auto-rotating market ticker', {
+                    from: this.currentMarketTicker,
+                    to: next.ticker,
+                    closeTime: next.close_time,
+                });
+                this.currentMarketTicker = next.ticker;
+                if (this.state)
+                    this.state.marketTicker = next.ticker;
+                // Tell WS client to resubscribe to the new ticker.
+                this.kalshiWsClient?.setMarketTicker(next.ticker);
             }
+        }
+        catch {
+            // Best-effort; ignore rotation failures.
         }
     }
     async stop() {
@@ -647,6 +675,8 @@ class BotRunner {
             return;
         logger_js_1.default.info('Stopping bot runner');
         this.kalshiFetchLoopActive = false;
+        this.kalshiWsClient?.disconnect();
+        this.kalshiWsClient = null;
         if (this.pollTimer) {
             clearInterval(this.pollTimer);
             this.pollTimer = null;

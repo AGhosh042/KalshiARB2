@@ -64,7 +64,7 @@ class KalshiClient {
         }
         this.http = axios_1.default.create({
             baseURL: config_js_1.config.kalshi.baseUrl,
-            timeout: 10_000,
+            timeout: 20_000,
             headers: {
                 'Content-Type': 'application/json',
                 Accept: 'application/json',
@@ -116,6 +116,30 @@ class KalshiClient {
         };
     }
     /**
+     * Retries a callback on HTTP 429, respecting Retry-After header.
+     * Up to 3 attempts with a minimum 1s backoff.
+     */
+    async withRateLimitRetry(fn) {
+        const MAX_RETRIES = 3;
+        let attempt = 0;
+        while (true) {
+            try {
+                return await fn();
+            }
+            catch (err) {
+                if (axios_1.default.isAxiosError(err) && err.response?.status === 429 && attempt < MAX_RETRIES) {
+                    const retryAfter = Number(err.response.headers['retry-after'] ?? 1);
+                    const delayMs = (isFinite(retryAfter) && retryAfter > 0 ? retryAfter : 1) * 1000;
+                    logger_js_1.default.warn('Kalshi 429 rate limit — backing off', { attempt: attempt + 1, delayMs });
+                    await new Promise(resolve => setTimeout(resolve, delayMs));
+                    attempt++;
+                    continue;
+                }
+                throw err;
+            }
+        }
+    }
+    /**
      * Centralized error handler: logs the error and re-throws a normalized Error.
      */
     handleError(context, err) {
@@ -144,7 +168,7 @@ class KalshiClient {
      */
     async getMarket(ticker) {
         try {
-            const resp = await this.http.get(`/markets/${ticker}`);
+            const resp = await this.withRateLimitRetry(() => this.http.get(`/markets/${ticker}`));
             const raw = resp.data.market;
             return (0, marketNormalize_js_1.buildKalshiMarketFromRaw)(raw);
         }
@@ -196,7 +220,7 @@ class KalshiClient {
      */
     async getPositions() {
         try {
-            const resp = await this.http.get('/portfolio/positions');
+            const resp = await this.withRateLimitRetry(() => this.http.get('/portfolio/positions'));
             return (resp.data.market_positions ?? []).map((p) => ({
                 ticker: p.ticker,
                 // Kalshi returns position as `position_fp` (decimal string, e.g. "31.00").
@@ -247,7 +271,7 @@ class KalshiClient {
             if (req.reduce_only === true) {
                 body['reduce_only'] = true;
             }
-            const resp = await this.http.post('/portfolio/orders', body);
+            const resp = await this.withRateLimitRetry(() => this.http.post('/portfolio/orders', body));
             const o = resp.data.order;
             const price = o.yes_price ?? o.no_price ?? 0;
             return {
@@ -275,10 +299,15 @@ class KalshiClient {
      */
     async cancelOrder(orderId) {
         try {
-            await this.http.delete(`/portfolio/orders/${orderId}`);
+            await this.withRateLimitRetry(() => this.http.delete(`/portfolio/orders/${orderId}`));
             logger_js_1.default.info('Cancelled Kalshi order', { orderId });
         }
         catch (err) {
+            // 404 = order already filled/cancelled — this is not an error.
+            if (axios_1.default.isAxiosError(err) && err.response?.status === 404) {
+                logger_js_1.default.debug('cancelOrder: order not found (already filled/cancelled)', { orderId });
+                return;
+            }
             this.handleError(`cancelOrder(${orderId})`, err);
         }
     }

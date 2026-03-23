@@ -57,6 +57,10 @@ function loadConfig() {
             .map(line => line.startsWith('-----') ? line : line.replace(/ /g, ''))
             .join('\n');
     }
+    // BUG-H1: Evaluate referencePriceDollars once so demoKalshiUnderlyingDollars
+    // can reuse it without a nested getEnvNumber call (which would be eagerly evaluated
+    // even if DEMO_KALSHI_UNDERLYING_DOLLARS is set, crashing on bad outer env var).
+    const referencePriceDollars = getEnvNumber('KALSHI_REFERENCE_PRICE_DOLLARS', 85000);
     return {
         kalshi: {
             apiKeyId: getEnvString('KALSHI_API_KEY_ID', ''),
@@ -74,15 +78,29 @@ function loadConfig() {
             priceMoveThresholdPct: getEnvNumber('PRICE_MOVE_THRESHOLD_PCT', 0.05),
             kalshiEdgeThreshold: getEnvNumber('KALSHI_EDGE_THRESHOLD', 3),
             // Used for detecting Coinbase/market "intersection" based on the market's reference/strike price.
-            referencePriceDollars: getEnvNumber('KALSHI_REFERENCE_PRICE_DOLLARS', 71052.06),
-            demoKalshiUnderlyingDollars: getEnvNumber('DEMO_KALSHI_UNDERLYING_DOLLARS', getEnvNumber('KALSHI_REFERENCE_PRICE_DOLLARS', 71052.06)),
+            // Default updated to reflect current BTC price range — override via KALSHI_REFERENCE_PRICE_DOLLARS env var.
+            referencePriceDollars,
+            demoKalshiUnderlyingDollars: getEnvNumber('DEMO_KALSHI_UNDERLYING_DOLLARS', referencePriceDollars),
             maxPositionSize: getEnvNumber('MAX_POSITION_SIZE', 50),
             maxOpenOrders: getEnvNumber('MAX_OPEN_ORDERS', 2),
-            pollIntervalMs: getEnvNumber('POLL_INTERVAL_MS', 1),
+            pollIntervalMs: getEnvNumber('POLL_INTERVAL_MS', 1000),
             trendWindowSeconds: getEnvNumber('TREND_WINDOW_SECONDS', 30),
-            orderCooldownMs: 0,
-            minSecondsBeforeExpiry: 60,
-            balanceFractionPerTrade: 0.05,
+            // 45s cooldown prevents churn in choppy markets around the strike.
+            orderCooldownMs: getEnvNumber('ORDER_COOLDOWN_MS', 45_000),
+            // Don't trade in the last 3 minutes — Kalshi has already repriced, lag is gone.
+            minSecondsBeforeExpiry: getEnvNumber('MIN_SECONDS_BEFORE_EXPIRY', 45),
+            // Don't trade with more than 12 minutes left — too much uncertainty, signal is weak.
+            maxSecondsBeforeExpiry: getEnvNumber('MAX_SECONDS_BEFORE_EXPIRY', 870),
+            // BTC must be at least 0.15% past the strike to enter — filters noise crosses.
+            displacementThresholdPct: getEnvNumber('DISPLACEMENT_THRESHOLD_PCT', 0.15),
+            // Take profit when position is +10c in our favor (flat TP). Set TAKE_PROFIT_CENTS=0 to disable.
+            takeProfitCents: getEnvNumber('TAKE_PROFIT_CENTS', 0),
+            // Take profit when trade P&L reaches this % of cost basis. Default 10% (0.10). Set to 0 to disable.
+            takeProfitPct: getEnvNumber('TAKE_PROFIT_PCT', 0.10),
+            // Stop loss when position is -12c underwater.
+            stopLossCents: getEnvNumber('STOP_LOSS_CENTS', 12),
+            // BUG-H4: Was hardcoded — now env-overridable via BALANCE_FRACTION_PER_TRADE.
+            balanceFractionPerTrade: getEnvNumber('BALANCE_FRACTION_PER_TRADE', 0.05),
             exitLimitGraceMs: getEnvNumber('EXIT_LIMIT_GRACE_MS', 5_000),
             // Safety cap on total time stuck in pending exit (after limit + market attempts).
             exitWaitTimeoutMs: getEnvNumber('EXIT_WAIT_TIMEOUT_MS', 120_000),

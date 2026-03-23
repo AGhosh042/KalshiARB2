@@ -19,7 +19,12 @@ export declare class CoinbaseClient extends EventEmitter {
     private baseReconnectDelay;
     private isShuttingDown;
     private reconnectTimer;
+    private watchdogTimer;
+    private lastMessageAt;
+    private static readonly MESSAGE_WATCHDOG_MS;
+    private static readonly WATCHDOG_CHECK_INTERVAL_MS;
     constructor();
+    private clearTimers;
     connect(): void;
     private subscribe;
     private handleMessage;

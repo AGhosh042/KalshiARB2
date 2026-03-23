@@ -22,6 +22,16 @@ export interface Config {
         trendWindowSeconds: number;
         orderCooldownMs: number;
         minSecondsBeforeExpiry: number;
+        /** Don't trade when more than this many seconds remain — too much uncertainty. */
+        maxSecondsBeforeExpiry: number;
+        /** BTC must be at least this % past the strike before entering (filters noise crosses). */
+        displacementThresholdPct: number;
+        /** Exit when position is profitable by this many cents (flat TP). Set to 0 to disable. */
+        takeProfitCents: number;
+        /** Exit when trade P&L reaches this fraction of cost basis (proportional TP). e.g. 0.10 = +10%. Set to 0 to disable. */
+        takeProfitPct: number;
+        /** Exit when position is underwater by this many cents. */
+        stopLossCents: number;
         balanceFractionPerTrade: number;
         /** After placing a limit exit, wait this long (live only); if still exposed, cancel limit and use market sells. */
         exitLimitGraceMs: number;

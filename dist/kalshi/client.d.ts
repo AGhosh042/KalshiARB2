@@ -1,8 +1,9 @@
+import crypto from 'crypto';
 import type { KalshiMarket, KalshiOrder, KalshiOrderRequest, KalshiPosition } from './types.js';
 export declare class KalshiClient {
     private readonly http;
-    private readonly apiKeyId;
-    private readonly privateKey;
+    readonly apiKeyId: string;
+    readonly privateKey: crypto.KeyObject | null;
     constructor();
     /**
      * Path used in the signature: must match Kalshi docs — full path under /trade-api/v2,
@@ -14,6 +15,11 @@ export declare class KalshiClient {
      * Payload: timestamp + METHOD + path (no body).
      */
     private buildAuthHeaders;
+    /**
+     * Retries a callback on HTTP 429, respecting Retry-After header.
+     * Up to 3 attempts with a minimum 1s backoff.
+     */
+    private withRateLimitRetry;
     /**
      * Centralized error handler: logs the error and re-throws a normalized Error.
      */

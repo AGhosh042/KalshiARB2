@@ -25,7 +25,6 @@ export declare class ArbStrategy {
     private openOrderIds;
     private lastMarketTicker;
     private prevCoinbasePrice;
-    private prevKalshiUnderlyingPriceDollars;
     private peakCoinbase;
     private troughCoinbase;
     private lastCoinbasePriceDollars;
@@ -42,6 +41,17 @@ export declare class ArbStrategy {
     private currentTradePnLMode;
     private lastCoinbaseDirection;
     private lastCoinbaseMinusUnderlyingDollars;
+    private lastEvaluatedCoinbasePrice;
+    private ema5s;
+    private ema20s;
+    private prevEma5s;
+    private prevEma20s;
+    private static readonly EMA5_ALPHA;
+    private static readonly EMA20_ALPHA;
+    private crossTimestamps;
+    private static readonly REGIME_WINDOW_MS;
+    private static readonly REGIME_MAX_CROSSES;
+    private regimePausedUntilMs;
     private pendingSide;
     private pendingPhase;
     private pendingExitOrderId;
@@ -109,8 +119,11 @@ export declare class ArbStrategy {
      */
     private computePositionSize;
     /**
-     * Guard against empty books: when Kalshi has no contracts on either side,
-     * prices are often 0/0 for that side and we should avoid placing any orders.
+     * Guard against empty books for a specific side.
+     * Only checks the side we intend to enter — avoids blocking valid YES entries
+     * when NO contracts are worthless (deep ITM market) and vice versa.
+     * If no side is specified, falls back to blocking if EITHER side is unavailable
+     * (conservative — used for exits where we need full book depth).
      */
     private isOrderbookUnavailable;
     /**
@@ -157,6 +170,12 @@ export declare class ArbStrategy {
     private placeEntryOrder;
     private placeExitOrder;
     private placeMarketExitOrder;
+    /**
+     * Checks TP, SL, and TTE-based exits. Returns an exit result if we should close,
+     * null if position should be held or there's nothing to do.
+     * Called before cross detection so exits fire on every tick.
+     */
+    private checkProfitAndLossExits;
     private hold;
     /**
      * Cancel all tracked open orders. Called on shutdown.

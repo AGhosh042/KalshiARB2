@@ -76,6 +76,7 @@ export declare class BotRunner {
     private isEvaluating;
     private latestMarket;
     private kalshiFetchLoopActive;
+    private kalshiWsClient;
     private state;
     private trades;
     private startBalanceCents;
@@ -94,8 +95,11 @@ export declare class BotRunner {
      * contain the series prefix (e.g. "kxbtc15m") — the exact contract is auto-discovered.
      */
     private initializeMarketTicker;
-    /** Kalshi market fetch loop for live mode — runs as fast as the REST API allows. */
-    private runKalshiFetchLoop;
+    /** Start real-time Kalshi market data via WebSocket (replaces REST polling loop). */
+    private startKalshiWsFeed;
+    private lastRotationCheckMs;
+    /** Auto-rotate to the next open market (called when current market is near/past close). */
+    private tryRotateMarketTicker;
     stop(): Promise<void>;
 }
 //# sourceMappingURL=botRunner.d.ts.map

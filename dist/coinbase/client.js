@@ -17,15 +17,31 @@ class CoinbaseClient extends events_1.EventEmitter {
     baseReconnectDelay = 1_000;
     isShuttingDown = false;
     reconnectTimer = null;
+    // Message watchdog: Coinbase Advanced Trade WS does not respond to WS-level ping frames.
+    // Instead we track the last received message timestamp and terminate if silent for 45s.
+    watchdogTimer = null;
+    lastMessageAt = 0;
+    static MESSAGE_WATCHDOG_MS = 45_000;
+    static WATCHDOG_CHECK_INTERVAL_MS = 10_000;
     constructor() {
         super();
     }
+    clearTimers() {
+        if (this.watchdogTimer) {
+            clearInterval(this.watchdogTimer);
+            this.watchdogTimer = null;
+        }
+    }
     connect() {
+        this.clearTimers();
         if (this.ws) {
             this.ws.removeAllListeners();
             this.ws.terminate();
             this.ws = null;
         }
+        // Clear price history on (re)connect — stale data from a prior session
+        // would corrupt trend/EMA calculations on the fresh stream.
+        this.priceHistory = [];
         logger_js_1.default.info('Connecting to Coinbase Advanced Trade WebSocket', {
             url: config_js_1.config.coinbase.wsUrl,
         });
@@ -33,15 +49,28 @@ class CoinbaseClient extends events_1.EventEmitter {
         this.ws.on('open', () => {
             logger_js_1.default.info('Coinbase WebSocket connected');
             this.reconnectAttempt = 0;
+            this.lastMessageAt = Date.now();
             this.subscribe();
+            // Coinbase Advanced Trade WS does not respond to WS-level ping frames.
+            // Use a message watchdog instead: check every 10s that we received a
+            // message in the last 45s. If silent, the connection is stale — reconnect.
+            this.watchdogTimer = setInterval(() => {
+                const silentMs = Date.now() - this.lastMessageAt;
+                if (silentMs > CoinbaseClient.MESSAGE_WATCHDOG_MS) {
+                    logger_js_1.default.warn('Coinbase WebSocket: message watchdog timeout — reconnecting', { silentMs });
+                    this.ws?.terminate();
+                }
+            }, CoinbaseClient.WATCHDOG_CHECK_INTERVAL_MS);
         });
         this.ws.on('message', (data) => {
+            this.lastMessageAt = Date.now();
             this.handleMessage(data.toString());
         });
         this.ws.on('error', (err) => {
             logger_js_1.default.error('Coinbase WebSocket error', { error: err.message });
         });
         this.ws.on('close', (code, reason) => {
+            this.clearTimers();
             logger_js_1.default.warn('Coinbase WebSocket closed', {
                 code,
                 reason: reason.toString(),
@@ -171,6 +200,7 @@ class CoinbaseClient extends events_1.EventEmitter {
     }
     disconnect() {
         this.isShuttingDown = true;
+        this.clearTimers();
         if (this.reconnectTimer) {
             clearTimeout(this.reconnectTimer);
             this.reconnectTimer = null;
