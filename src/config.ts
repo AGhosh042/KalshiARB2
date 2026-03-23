@@ -156,8 +156,8 @@ function loadConfig(): Config {
       stopLossCents: getEnvNumber('STOP_LOSS_CENTS', 0),
       // Proportional stop loss: mirrors takeProfitPct for 1:1 RR. Default 10% of entry. Set to 0 to disable.
       stopLossPct: getEnvNumber('STOP_LOSS_PCT', 0.10),
-      // Grace period after entry before SL can trigger. Default 60s — lets the spread settle.
-      stopLossGraceMs: getEnvNumber('STOP_LOSS_GRACE_MS', 60_000),
+      // Grace period after entry before SL can trigger. Default 20s — lets the spread settle.
+      stopLossGraceMs: getEnvNumber('STOP_LOSS_GRACE_MS', 20_000),
       // BUG-H4: Was hardcoded — now env-overridable via BALANCE_FRACTION_PER_TRADE.
       balanceFractionPerTrade: getEnvNumber('BALANCE_FRACTION_PER_TRADE', 0.05),
       exitLimitGraceMs: getEnvNumber('EXIT_LIMIT_GRACE_MS', 5_000),
