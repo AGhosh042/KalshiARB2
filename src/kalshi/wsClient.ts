@@ -55,6 +55,7 @@ export class KalshiWsClient extends EventEmitter {
 
   // Tracks the last known market state — patched incrementally as ticks arrive.
   private latestMarket: KalshiMarket | null = null;
+  private latestMarketTimestamp = 0; // ms timestamp of last tick
 
   // RSA key for authenticated WS connection (needed for private channels, optional for ticker).
   private readonly apiKeyId: string;
@@ -271,12 +272,19 @@ export class KalshiWsClient extends EventEmitter {
     };
 
     this.latestMarket = market;
+    this.latestMarketTimestamp = Date.now();
     this.emit('market', market);
   }
 
   /** Get the last known market state without waiting for the next tick. */
   getLatestMarket(): KalshiMarket | null {
     return this.latestMarket;
+  }
+
+  /** Returns ms since the last market tick was received. Used to detect stale data. */
+  getUnderlyingAgeMsMs(): number {
+    if (this.latestMarketTimestamp === 0) return Infinity;
+    return Date.now() - this.latestMarketTimestamp;
   }
 
   /** Gracefully close the connection. */

@@ -49,16 +49,19 @@ export class CoinbaseClient extends EventEmitter {
   private baseReconnectDelay = 1_000;
   private isShuttingDown = false;
   private reconnectTimer: NodeJS.Timeout | null = null;
-  private pingTimer: NodeJS.Timeout | null = null;
-  private pongTimeout: NodeJS.Timeout | null = null;
+  // Message watchdog: Coinbase Advanced Trade WS does not respond to WS-level ping frames.
+  // Instead we track the last received message timestamp and terminate if silent for 45s.
+  private watchdogTimer: NodeJS.Timeout | null = null;
+  private lastMessageAt = 0;
+  private static readonly MESSAGE_WATCHDOG_MS = 45_000;
+  private static readonly WATCHDOG_CHECK_INTERVAL_MS = 10_000;
 
   constructor() {
     super();
   }
 
   private clearTimers(): void {
-    if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
-    if (this.pongTimeout) { clearTimeout(this.pongTimeout); this.pongTimeout = null; }
+    if (this.watchdogTimer) { clearInterval(this.watchdogTimer); this.watchdogTimer = null; }
   }
 
   connect(): void {
@@ -81,25 +84,23 @@ export class CoinbaseClient extends EventEmitter {
     this.ws.on('open', () => {
       logger.info('Coinbase WebSocket connected');
       this.reconnectAttempt = 0;
+      this.lastMessageAt = Date.now();
       this.subscribe();
 
-      // Heartbeat: ping every 30s. If no pong within 10s, terminate and reconnect.
-      this.pingTimer = setInterval(() => {
-        if (this.ws?.readyState === WebSocket.OPEN) {
-          this.ws.ping();
-          this.pongTimeout = setTimeout(() => {
-            logger.warn('Coinbase WebSocket: pong timeout — terminating stale connection');
-            this.ws?.terminate();
-          }, 10_000);
+      // Coinbase Advanced Trade WS does not respond to WS-level ping frames.
+      // Use a message watchdog instead: check every 10s that we received a
+      // message in the last 45s. If silent, the connection is stale — reconnect.
+      this.watchdogTimer = setInterval(() => {
+        const silentMs = Date.now() - this.lastMessageAt;
+        if (silentMs > CoinbaseClient.MESSAGE_WATCHDOG_MS) {
+          logger.warn('Coinbase WebSocket: message watchdog timeout — reconnecting', { silentMs });
+          this.ws?.terminate();
         }
-      }, 30_000);
-
-      this.ws!.on('pong', () => {
-        if (this.pongTimeout) { clearTimeout(this.pongTimeout); this.pongTimeout = null; }
-      });
+      }, CoinbaseClient.WATCHDOG_CHECK_INTERVAL_MS);
     });
 
     this.ws.on('message', (data: WebSocket.RawData) => {
+      this.lastMessageAt = Date.now();
       this.handleMessage(data.toString());
     });
 

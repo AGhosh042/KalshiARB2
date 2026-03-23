@@ -76,7 +76,7 @@ export class KalshiClient {
 
     this.http = axios.create({
       baseURL: config.kalshi.baseUrl,
-      timeout: 10_000,
+      timeout: 20_000,
       headers: {
         'Content-Type': 'application/json',
         Accept: 'application/json',
@@ -252,7 +252,9 @@ export class KalshiClient {
    */
   async getPositions(): Promise<KalshiPosition[]> {
     try {
-      const resp = await this.http.get<KalshiPositionsResponse>('/portfolio/positions');
+      const resp = await this.withRateLimitRetry(() =>
+        this.http.get<KalshiPositionsResponse>('/portfolio/positions')
+      );
       return (resp.data.market_positions ?? []).map((p) => ({
         ticker: p.ticker,
         // Kalshi returns position as `position_fp` (decimal string, e.g. "31.00").
