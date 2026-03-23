@@ -1361,9 +1361,19 @@ export class ArbStrategy {
       return exitRes;
     };
 
-    // Take profit: Kalshi has repriced in our favor by takeProfitCents.
-    if (pnlCents >= config.strategy.takeProfitCents) {
-      return await fireExit(`TAKE PROFIT triggered (+${pnlCents}c)`);
+    // Take profit (flat): Kalshi has repriced in our favor by takeProfitCents.
+    if (config.strategy.takeProfitCents > 0 && pnlCents >= config.strategy.takeProfitCents) {
+      return await fireExit(`TAKE PROFIT triggered (+${pnlCents}c flat)`);
+    }
+
+    // Take profit (proportional): P&L has reached takeProfitPct of cost basis.
+    // e.g. entry=43c, pct=0.10 → fires when bid >= 47.3c (+4.3c on 43c entry).
+    if (config.strategy.takeProfitPct > 0 && entry > 0) {
+      const tpThresholdCents = entry * config.strategy.takeProfitPct;
+      if (pnlCents >= tpThresholdCents) {
+        const pnlPct = ((pnlCents / entry) * 100).toFixed(1);
+        return await fireExit(`TAKE PROFIT triggered (+${pnlCents.toFixed(1)}c = +${pnlPct}% of entry)`);
+      }
     }
 
     // Stop loss: underwater by stopLossCents at any time.

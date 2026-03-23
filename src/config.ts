@@ -58,8 +58,10 @@ export interface Config {
     maxSecondsBeforeExpiry: number;
     /** BTC must be at least this % past the strike before entering (filters noise crosses). */
     displacementThresholdPct: number;
-    /** Exit when position is profitable by this many cents. */
+    /** Exit when position is profitable by this many cents (flat TP). Set to 0 to disable. */
     takeProfitCents: number;
+    /** Exit when trade P&L reaches this fraction of cost basis (proportional TP). e.g. 0.10 = +10%. Set to 0 to disable. */
+    takeProfitPct: number;
     /** Exit when position is underwater by this many cents. */
     stopLossCents: number;
     balanceFractionPerTrade: number;
@@ -142,8 +144,10 @@ function loadConfig(): Config {
       maxSecondsBeforeExpiry: getEnvNumber('MAX_SECONDS_BEFORE_EXPIRY', 870),
       // BTC must be at least 0.15% past the strike to enter — filters noise crosses.
       displacementThresholdPct: getEnvNumber('DISPLACEMENT_THRESHOLD_PCT', 0.15),
-      // Take profit when position is +10c in our favor (Kalshi has repriced).
-      takeProfitCents: getEnvNumber('TAKE_PROFIT_CENTS', 10),
+      // Take profit when position is +10c in our favor (flat TP). Set TAKE_PROFIT_CENTS=0 to disable.
+      takeProfitCents: getEnvNumber('TAKE_PROFIT_CENTS', 0),
+      // Take profit when trade P&L reaches this % of cost basis. Default 10% (0.10). Set to 0 to disable.
+      takeProfitPct: getEnvNumber('TAKE_PROFIT_PCT', 0.10),
       // Stop loss when position is -12c underwater.
       stopLossCents: getEnvNumber('STOP_LOSS_CENTS', 12),
       // BUG-H4: Was hardcoded — now env-overridable via BALANCE_FRACTION_PER_TRADE.
