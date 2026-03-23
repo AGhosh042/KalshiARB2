@@ -72,8 +72,8 @@ export class ArbStrategy {
 
   // Regime filter: track strike crossings within a rolling window.
   private crossTimestamps: number[] = [];
-  private static readonly REGIME_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
-  private static readonly REGIME_MAX_CROSSES = 8;
+  private static readonly REGIME_WINDOW_MS = 3 * 60 * 1000; // 3 minutes (tighter window = less false-positive pauses)
+  private static readonly REGIME_MAX_CROSSES = 12;           // raised from 8 — was triggering on normal BTC volatility
   private regimePausedUntilMs = 0;
 
   // Sequential exit-then-entry state machine:

@@ -456,6 +456,16 @@ export class BotRunner {
         }
         // Evaluate immediately on every Coinbase tick using the latest cached Kalshi market.
         if (this.latestMarket) {
+          // Warn if Kalshi underlying price is stale (>30s without a WS tick).
+          const underlyingAgeMs = this.lastKalshiUnderlyingUpdateAtMs
+            ? Date.now() - this.lastKalshiUnderlyingUpdateAtMs
+            : null;
+          if (underlyingAgeMs !== null && underlyingAgeMs > 30_000) {
+            logger.warn('Kalshi underlying price is stale — WS may not be pushing ticks', {
+              staleSec: (underlyingAgeMs / 1000).toFixed(0),
+              lastKnownUnderlying: this.lastKalshiUnderlyingPriceDollars,
+            });
+          }
           void evaluateWithMarket(data, this.latestMarket);
         }
       });
