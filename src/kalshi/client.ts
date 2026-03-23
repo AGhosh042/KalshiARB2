@@ -292,7 +292,9 @@ export class KalshiClient {
         type: req.type,
       };
 
-      if (req.type === 'limit') {
+      // Attach price for both limit and ioc orders — Kalshi requires exactly one price field
+      // regardless of order type. IoC exit orders still need yes_price / no_price.
+      if (req.type === 'limit' || req.type === 'ioc') {
         if (req.side === 'yes' && req.yes_price !== undefined) {
           body['yes_price'] = req.yes_price;
         } else if (req.side === 'no' && req.no_price !== undefined) {
