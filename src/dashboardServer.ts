@@ -32,6 +32,28 @@ app.use(express.json());
 
 const runner = new BotRunner();
 
+// BUG-C1: Single shared KalshiClient — never create per-request.
+// Creating a new client per request leaks file descriptors (TLS sockets) because
+// the dashboard polls /api/demo-market-seed every 2s.
+const sharedKalshiClient = new KalshiClient();
+
+// BUG-H3: Require a preshared token on all POST routes when DASHBOARD_TOKEN is set.
+// If not set, bind only to localhost and warn loudly.
+const dashboardToken = process.env['DASHBOARD_TOKEN'] ?? null;
+if (!dashboardToken) {
+  logger.warn('DASHBOARD_TOKEN not set — dashboard POST routes are unprotected. Set DASHBOARD_TOKEN in .env to require auth.');
+}
+
+function requireDashboardAuth(req: express.Request, res: express.Response, next: express.NextFunction): void {
+  if (!dashboardToken) { next(); return; }
+  const token = (req.headers['x-dashboard-token'] as string | undefined) ?? (req.query['token'] as string | undefined);
+  if (token !== dashboardToken) {
+    res.status(401).json({ error: 'Unauthorized — set X-Dashboard-Token header' });
+    return;
+  }
+  next();
+}
+
 app.get('/', (_req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.send(`<!doctype html>
@@ -459,7 +481,7 @@ app.get('/api/trades', (_req, res) => {
 app.get('/api/demo-market-seed', async (_req, res) => {
   const now = Date.now();
   try {
-    const client = new KalshiClient();
+    const client = sharedKalshiClient;
 
     // Always discover the live ticker from the API rather than using the static config value,
     // which may point to an expired contract.
@@ -496,17 +518,37 @@ app.get('/api/demo-market-seed', async (_req, res) => {
   }
 });
 
-app.post('/api/start', async (req, res) => {
+app.post('/api/start', requireDashboardAuth, async (req, res) => {
   const mode = req.body?.mode as BotMode | undefined;
-  const theoreticalBalanceDollars = Number(req.body?.theoreticalBalanceDollars ?? 1000);
-  const demoUnderlyingDollars =
-    req.body?.demoUnderlyingDollars !== undefined ? Number(req.body.demoUnderlyingDollars) : undefined;
-  const demoTargetDollars =
-    req.body?.demoTargetDollars !== undefined ? Number(req.body.demoTargetDollars) : undefined;
 
   if (!mode || (mode !== 'live' && mode !== 'demo')) {
     res.status(400).json({ error: 'mode must be live|demo' });
     return;
+  }
+
+  // BUG-H2: validate numeric inputs — Number('abc') = NaN propagates silently.
+  const theoreticalBalanceDollars = Number(req.body?.theoreticalBalanceDollars ?? 1000);
+  if (!Number.isFinite(theoreticalBalanceDollars) || theoreticalBalanceDollars <= 0) {
+    res.status(400).json({ error: 'theoreticalBalanceDollars must be a positive number' });
+    return;
+  }
+
+  let demoUnderlyingDollars: number | undefined;
+  if (req.body?.demoUnderlyingDollars !== undefined) {
+    demoUnderlyingDollars = Number(req.body.demoUnderlyingDollars);
+    if (!Number.isFinite(demoUnderlyingDollars) || demoUnderlyingDollars <= 0) {
+      res.status(400).json({ error: 'demoUnderlyingDollars must be a positive number' });
+      return;
+    }
+  }
+
+  let demoTargetDollars: number | undefined;
+  if (req.body?.demoTargetDollars !== undefined) {
+    demoTargetDollars = Number(req.body.demoTargetDollars);
+    if (!Number.isFinite(demoTargetDollars) || demoTargetDollars <= 0) {
+      res.status(400).json({ error: 'demoTargetDollars must be a positive number' });
+      return;
+    }
   }
 
   try {
@@ -520,7 +562,7 @@ app.post('/api/start', async (req, res) => {
   }
 });
 
-app.post('/api/stop', async (_req, res) => {
+app.post('/api/stop', requireDashboardAuth, async (_req, res) => {
   try {
     await runner.stop();
     res.json({ ok: true });
@@ -532,7 +574,7 @@ app.post('/api/stop', async (_req, res) => {
   }
 });
 
-app.post('/api/breakeven-toggle', (_req, res) => {
+app.post('/api/breakeven-toggle', requireDashboardAuth, (_req, res) => {
   const current = runner.isBreakevenCloseEnabled();
   runner.setBreakevenClose(!current);
   res.json({ breakevenCloseEnabled: !current });

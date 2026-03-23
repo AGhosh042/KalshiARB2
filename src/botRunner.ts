@@ -765,9 +765,16 @@ export class BotRunner {
     this.kalshiWsClient.connect();
   }
 
+  // BUG-I2: Debounce rotation checks — runs on every WS tick without this guard,
+  // which fires 100+ concurrent REST calls racing on this.currentMarketTicker.
+  private lastRotationCheckMs = 0;
+
   /** Auto-rotate to the next open market (called when current market is near/past close). */
   private async tryRotateMarketTicker(): Promise<void> {
     if (!this.kalshiClient) return;
+    // Debounce: skip if we checked less than 10s ago.
+    if (Date.now() - this.lastRotationCheckMs < 10_000) return;
+    this.lastRotationCheckMs = Date.now();
 
     try {
       const positions = await this.kalshiClient.getPositions();

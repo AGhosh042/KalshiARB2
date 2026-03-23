@@ -50,6 +50,7 @@ export class KalshiWsClient extends EventEmitter {
   private reconnectDelayMs = 1000;
   private active = false;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private pongTimeout: ReturnType<typeof setTimeout> | null = null;
   private msgId = 1;
 
   // Tracks the last known market state — patched incrementally as ticks arrive.
@@ -131,10 +132,15 @@ export class KalshiWsClient extends EventEmitter {
   private doConnect(): void {
     if (!this.active) return;
 
+    // Build the WS URL robustly:
+    // 1. Strip trailing slash, 2. swap http(s) scheme to ws(s),
+    // 3. Replace the REST path suffix with the WS path.
+    // Using explicit replacements is safer than naive string concat.
     const wsUrl = config.kalshi.baseUrl
-      .replace('https://', 'wss://')
-      .replace('http://', 'ws://')
-      .replace('/trade-api/v2', '/trade-api/ws/v2');
+      .replace(/\/+$/, '')           // strip trailing slashes
+      .replace(/^https:\/\//, 'wss://')
+      .replace(/^http:\/\//, 'ws://')
+      .replace(/\/trade-api\/v2$/, '/trade-api/ws/v2');
 
     logger.info('KalshiWsClient: connecting', { url: wsUrl, ticker: this.marketTicker });
 
@@ -153,11 +159,24 @@ export class KalshiWsClient extends EventEmitter {
       }));
 
       // Heartbeat ping every 30s to keep connection alive.
+      // If no pong arrives within 10s, terminate — TCP may be silently dead.
       this.pingTimer = setInterval(() => {
         if (this.ws?.readyState === WebSocket.OPEN) {
           this.ws.ping();
+          this.pongTimeout = setTimeout(() => {
+            logger.warn('KalshiWsClient: pong timeout — terminating stale connection');
+            this.ws?.terminate();
+          }, 10_000);
         }
       }, 30_000);
+
+      // Clear pong timeout on receipt.
+      this.ws!.on('pong', () => {
+        if (this.pongTimeout) {
+          clearTimeout(this.pongTimeout);
+          this.pongTimeout = null;
+        }
+      });
 
       this.emit('connected');
     });
@@ -194,6 +213,10 @@ export class KalshiWsClient extends EventEmitter {
     if (this.pingTimer) {
       clearInterval(this.pingTimer);
       this.pingTimer = null;
+    }
+    if (this.pongTimeout) {
+      clearTimeout(this.pongTimeout);
+      this.pongTimeout = null;
     }
   }
 

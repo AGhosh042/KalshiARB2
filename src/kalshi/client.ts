@@ -141,6 +141,30 @@ export class KalshiClient {
   }
 
   /**
+   * Retries a callback on HTTP 429, respecting Retry-After header.
+   * Up to 3 attempts with a minimum 1s backoff.
+   */
+  private async withRateLimitRetry<T>(fn: () => Promise<T>): Promise<T> {
+    const MAX_RETRIES = 3;
+    let attempt = 0;
+    while (true) {
+      try {
+        return await fn();
+      } catch (err) {
+        if (axios.isAxiosError(err) && err.response?.status === 429 && attempt < MAX_RETRIES) {
+          const retryAfter = Number(err.response.headers['retry-after'] ?? 1);
+          const delayMs = (isFinite(retryAfter) && retryAfter > 0 ? retryAfter : 1) * 1000;
+          logger.warn('Kalshi 429 rate limit — backing off', { attempt: attempt + 1, delayMs });
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+          attempt++;
+          continue;
+        }
+        throw err;
+      }
+    }
+  }
+
+  /**
    * Centralized error handler: logs the error and re-throws a normalized Error.
    */
   private handleError(context: string, err: unknown): never {
@@ -172,7 +196,9 @@ export class KalshiClient {
    */
   async getMarket(ticker: string): Promise<KalshiMarket> {
     try {
-      const resp = await this.http.get<KalshiMarketResponse>(`/markets/${ticker}`);
+      const resp = await this.withRateLimitRetry(() =>
+        this.http.get<KalshiMarketResponse>(`/markets/${ticker}`)
+      );
       const raw = resp.data.market as Record<string, unknown>;
       return buildKalshiMarketFromRaw(raw);
     } catch (err) {
@@ -280,7 +306,9 @@ export class KalshiClient {
         body['reduce_only'] = true;
       }
 
-      const resp = await this.http.post<KalshiOrderResponse>('/portfolio/orders', body);
+      const resp = await this.withRateLimitRetry(() =>
+        this.http.post<KalshiOrderResponse>('/portfolio/orders', body)
+      );
       const o = resp.data.order;
       const price = o.yes_price ?? o.no_price ?? 0;
 
@@ -309,9 +337,16 @@ export class KalshiClient {
    */
   async cancelOrder(orderId: string): Promise<void> {
     try {
-      await this.http.delete(`/portfolio/orders/${orderId}`);
+      await this.withRateLimitRetry(() =>
+        this.http.delete(`/portfolio/orders/${orderId}`)
+      );
       logger.info('Cancelled Kalshi order', { orderId });
     } catch (err) {
+      // 404 = order already filled/cancelled — this is not an error.
+      if (axios.isAxiosError(err) && err.response?.status === 404) {
+        logger.debug('cancelOrder: order not found (already filled/cancelled)', { orderId });
+        return;
+      }
       this.handleError(`cancelOrder(${orderId})`, err);
     }
   }

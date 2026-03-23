@@ -102,6 +102,11 @@ function loadConfig(): Config {
       .join('\n');
   }
 
+  // BUG-H1: Evaluate referencePriceDollars once so demoKalshiUnderlyingDollars
+  // can reuse it without a nested getEnvNumber call (which would be eagerly evaluated
+  // even if DEMO_KALSHI_UNDERLYING_DOLLARS is set, crashing on bad outer env var).
+  const referencePriceDollars = getEnvNumber('KALSHI_REFERENCE_PRICE_DOLLARS', 85000);
+
   return {
     kalshi: {
       apiKeyId: getEnvString('KALSHI_API_KEY_ID', ''),
@@ -123,11 +128,8 @@ function loadConfig(): Config {
       kalshiEdgeThreshold: getEnvNumber('KALSHI_EDGE_THRESHOLD', 3),
       // Used for detecting Coinbase/market "intersection" based on the market's reference/strike price.
       // Default updated to reflect current BTC price range — override via KALSHI_REFERENCE_PRICE_DOLLARS env var.
-      referencePriceDollars: getEnvNumber('KALSHI_REFERENCE_PRICE_DOLLARS', 85000),
-      demoKalshiUnderlyingDollars: getEnvNumber(
-        'DEMO_KALSHI_UNDERLYING_DOLLARS',
-        getEnvNumber('KALSHI_REFERENCE_PRICE_DOLLARS', 85000)
-      ),
+      referencePriceDollars,
+      demoKalshiUnderlyingDollars: getEnvNumber('DEMO_KALSHI_UNDERLYING_DOLLARS', referencePriceDollars),
       maxPositionSize: getEnvNumber('MAX_POSITION_SIZE', 50),
       maxOpenOrders: getEnvNumber('MAX_OPEN_ORDERS', 2),
       pollIntervalMs: getEnvNumber('POLL_INTERVAL_MS', 1000),
@@ -144,7 +146,8 @@ function loadConfig(): Config {
       takeProfitCents: getEnvNumber('TAKE_PROFIT_CENTS', 10),
       // Stop loss when position is -12c underwater.
       stopLossCents: getEnvNumber('STOP_LOSS_CENTS', 12),
-      balanceFractionPerTrade: 0.05,
+      // BUG-H4: Was hardcoded — now env-overridable via BALANCE_FRACTION_PER_TRADE.
+      balanceFractionPerTrade: getEnvNumber('BALANCE_FRACTION_PER_TRADE', 0.05),
       exitLimitGraceMs: getEnvNumber('EXIT_LIMIT_GRACE_MS', 5_000),
       // Safety cap on total time stuck in pending exit (after limit + market attempts).
       exitWaitTimeoutMs: getEnvNumber('EXIT_WAIT_TIMEOUT_MS', 120_000),

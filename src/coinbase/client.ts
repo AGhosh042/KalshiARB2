@@ -49,17 +49,28 @@ export class CoinbaseClient extends EventEmitter {
   private baseReconnectDelay = 1_000;
   private isShuttingDown = false;
   private reconnectTimer: NodeJS.Timeout | null = null;
+  private pingTimer: NodeJS.Timeout | null = null;
+  private pongTimeout: NodeJS.Timeout | null = null;
 
   constructor() {
     super();
   }
 
+  private clearTimers(): void {
+    if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
+    if (this.pongTimeout) { clearTimeout(this.pongTimeout); this.pongTimeout = null; }
+  }
+
   connect(): void {
+    this.clearTimers();
     if (this.ws) {
       this.ws.removeAllListeners();
       this.ws.terminate();
       this.ws = null;
     }
+    // Clear price history on (re)connect — stale data from a prior session
+    // would corrupt trend/EMA calculations on the fresh stream.
+    this.priceHistory = [];
 
     logger.info('Connecting to Coinbase Advanced Trade WebSocket', {
       url: config.coinbase.wsUrl,
@@ -71,6 +82,21 @@ export class CoinbaseClient extends EventEmitter {
       logger.info('Coinbase WebSocket connected');
       this.reconnectAttempt = 0;
       this.subscribe();
+
+      // Heartbeat: ping every 30s. If no pong within 10s, terminate and reconnect.
+      this.pingTimer = setInterval(() => {
+        if (this.ws?.readyState === WebSocket.OPEN) {
+          this.ws.ping();
+          this.pongTimeout = setTimeout(() => {
+            logger.warn('Coinbase WebSocket: pong timeout — terminating stale connection');
+            this.ws?.terminate();
+          }, 10_000);
+        }
+      }, 30_000);
+
+      this.ws!.on('pong', () => {
+        if (this.pongTimeout) { clearTimeout(this.pongTimeout); this.pongTimeout = null; }
+      });
     });
 
     this.ws.on('message', (data: WebSocket.RawData) => {
@@ -82,6 +108,7 @@ export class CoinbaseClient extends EventEmitter {
     });
 
     this.ws.on('close', (code: number, reason: Buffer) => {
+      this.clearTimers();
       logger.warn('Coinbase WebSocket closed', {
         code,
         reason: reason.toString(),
@@ -235,6 +262,7 @@ export class CoinbaseClient extends EventEmitter {
 
   disconnect(): void {
     this.isShuttingDown = true;
+    this.clearTimers();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;

@@ -30,7 +30,7 @@ export class ArbStrategy {
   private openOrderIds: string[] = [];
   private lastMarketTicker: string | null = null;
   private prevCoinbasePrice: number | null = null;
-  private prevKalshiUnderlyingPriceDollars: number | null = null;
+
   private peakCoinbase: number | null = null;
   private troughCoinbase: number | null = null;
 
@@ -73,7 +73,7 @@ export class ArbStrategy {
   // Regime filter: track strike crossings within a rolling window.
   private crossTimestamps: number[] = [];
   private static readonly REGIME_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
-  private static readonly REGIME_MAX_CROSSES = 3;
+  private static readonly REGIME_MAX_CROSSES = 8;
   private regimePausedUntilMs = 0;
 
   // Sequential exit-then-entry state machine:
@@ -233,6 +233,8 @@ export class ArbStrategy {
    * min(MAX_POSITION_SIZE, floor(balance * balanceFractionPerTrade / askPriceInDollars))
    */
   private computePositionSize(balanceCents: number, askPriceCents: number, edgeCents?: number): number {
+    // Guard: degenerate ask price — division by zero would produce Infinity.
+    if (askPriceCents <= 0) return 0;
     // Dynamic sizing: scale position by edge magnitude relative to a reference edge of 10c.
     // Low edge (7c) → 70% of base size. High edge (20c) → 200% (capped by maxPositionSize).
     const baseFraction = config.strategy.balanceFractionPerTrade;
@@ -245,10 +247,16 @@ export class ArbStrategy {
   }
 
   /**
-   * Guard against empty books: when Kalshi has no contracts on either side,
-   * prices are often 0/0 for that side and we should avoid placing any orders.
+   * Guard against empty books for a specific side.
+   * Only checks the side we intend to enter — avoids blocking valid YES entries
+   * when NO contracts are worthless (deep ITM market) and vice versa.
+   * If no side is specified, falls back to blocking if EITHER side is unavailable
+   * (conservative — used for exits where we need full book depth).
    */
-  private isOrderbookUnavailable(market: KalshiMarket): boolean {
+  private isOrderbookUnavailable(market: KalshiMarket, side?: 'yes' | 'no'): boolean {
+    if (side === 'yes') return market.yes_bid <= 0 && market.yes_ask <= 0;
+    if (side === 'no') return market.no_bid <= 0 && market.no_ask <= 0;
+    // No side specified: block if either side is empty (conservative).
     const yesUnavailable = market.yes_bid <= 0 && market.yes_ask <= 0;
     const noUnavailable = market.no_bid <= 0 && market.no_ask <= 0;
     return yesUnavailable || noUnavailable;
@@ -320,7 +328,6 @@ export class ArbStrategy {
     if (this.lastMarketTicker !== market.ticker) {
       this.lastMarketTicker = market.ticker;
       this.prevCoinbasePrice = null;
-      this.prevKalshiUnderlyingPriceDollars = null;
       this.peakCoinbase = null;
       this.troughCoinbase = null;
       this.lastCrossDirection = null;
@@ -405,11 +412,9 @@ export class ArbStrategy {
     }
 
     const prevPrice = this.prevCoinbasePrice;
-    const prevKalshiUnderlyingPriceDollars = this.prevKalshiUnderlyingPriceDollars;
     // Always advance the stored previous price so cross detection uses the last tick,
     // even when we return early during pending phases.
     this.prevCoinbasePrice = coinbasePrice;
-    this.prevKalshiUnderlyingPriceDollars = kalshiUnderlyingPriceDollars;
 
     // Get current position exposure.
     // Cache the result for POSITION_CACHE_TTL_MS to avoid an async API call on every Coinbase
@@ -513,8 +518,21 @@ export class ArbStrategy {
           this.armedTpExitLimitCents = null;
           this.armedTpExitSide = null;
 
+          // Spread gate: re-check before re-entry — book may have widened during exit wait.
+          const reEntrySide = this.pendingSide === 'long' ? 'yes' : 'no';
+          const reEntrySpread = reEntrySide === 'yes'
+            ? market.yes_ask - market.yes_bid
+            : market.no_ask - market.no_bid;
+          if (reEntrySpread > 8) {
+            this.pendingPhase = null;
+            this.pendingSide = null;
+            this.pendingExitOrderId = null;
+            this.pendingSinceMs = null;
+            return this.hold(`Spread too wide for re-entry: ${reEntrySpread}¢ > 8¢`);
+          }
+
           const entryRes =
-            this.pendingSide === 'long'
+            reEntrySide === 'yes'
               ? await this.placeEntryOrder(market, 'yes')
               : await this.placeEntryOrder(market, 'no');
 
@@ -749,12 +767,12 @@ export class ArbStrategy {
       // Record cross for regime filter.
       this.crossTimestamps.push(Date.now());
       if (this.crossTimestamps.length > ArbStrategy.REGIME_MAX_CROSSES) {
-        // Too many crosses in the window — market is choppy, pause for 2 minutes.
-        logger.warn('Regime filter triggered — too many strike crosses, pausing 2 min', {
+        // Too many EMA crosses in the window — market is choppy, pause 30s.
+        logger.warn('Regime filter triggered — too many EMA crosses, pausing 30s', {
           crossCount: this.crossTimestamps.length,
           windowMs: ArbStrategy.REGIME_WINDOW_MS,
         });
-        this.regimePausedUntilMs = Date.now() + 2 * 60 * 1000;
+        this.regimePausedUntilMs = Date.now() + 30 * 1000;
       }
     } else if (crossDown) {
       this.lastCrossDirection = 'down';
@@ -762,11 +780,11 @@ export class ArbStrategy {
       // Record cross for regime filter.
       this.crossTimestamps.push(Date.now());
       if (this.crossTimestamps.length > ArbStrategy.REGIME_MAX_CROSSES) {
-        logger.warn('Regime filter triggered — too many strike crosses, pausing 2 min', {
+        logger.warn('Regime filter triggered — too many EMA crosses, pausing 30s', {
           crossCount: this.crossTimestamps.length,
           windowMs: ArbStrategy.REGIME_WINDOW_MS,
         });
-        this.regimePausedUntilMs = Date.now() + 2 * 60 * 1000;
+        this.regimePausedUntilMs = Date.now() + 30 * 1000;
       }
     }
 
@@ -1012,8 +1030,10 @@ export class ArbStrategy {
   }
 
   private async placeEntryOrder(market: KalshiMarket, side: 'yes' | 'no'): Promise<EvaluationResult> {
-    if (this.isOrderbookUnavailable(market)) {
-      return this.hold('Orderbook unavailable — entry blocked');
+    // Check only the side we intend to enter — avoids blocking valid YES entries
+    // when NO contracts are worthless (deep ITM) and vice versa.
+    if (this.isOrderbookUnavailable(market, side)) {
+      return this.hold(`Orderbook unavailable for ${side.toUpperCase()} entry`);
     }
     const can = await this.canPlaceNewOrder(market.ticker);
     if (!can.ok) return this.hold(can.reason ?? 'Cannot place entry order');
@@ -1315,16 +1335,40 @@ export class ArbStrategy {
     const count = Math.abs(positionContracts);
     const pnlCents = bid - entry;
 
+    // Helper: place exit and immediately set pendingPhase to prevent duplicate orders
+    // being fired on subsequent ticks before the position cache refreshes (500ms TTL).
+    const fireExit = async (reason: string): Promise<EvaluationResult> => {
+      // Record realized P/L immediately using current bid as the exit estimate.
+      if (this.currentTradeEntryLimitCents !== null && this.currentTradeCount !== null) {
+        const realized = count * (bid - this.currentTradeEntryLimitCents);
+        this.currentTradePnLCents = Math.round(realized);
+        this.currentTradePnLMode = 'realized';
+        // Arm exit price for pending-phase P/L reconciliation.
+        this.armedTpExitLimitCents = bid;
+        this.armedTpExitSide = heldSide;
+      }
+      const exitRes = await this.placeMarketExitOrder(market, heldSide, count);
+      if (exitRes.action !== 'hold') {
+        // Lock out further exit attempts until position cache confirms flat.
+        this.pendingPhase = 'exit';
+        this.pendingSide = isLong ? 'short' : 'long';
+        this.pendingSinceMs = Date.now();
+        this.pendingExitOrderId = exitRes.orderId ?? null;
+        // Force-invalidate position cache so next tick fetches fresh data.
+        this.lastPositionFetchMs = 0;
+        logger.info(reason, { heldSide, bid, entry, pnlCents, count });
+      }
+      return exitRes;
+    };
+
     // Take profit: Kalshi has repriced in our favor by takeProfitCents.
     if (pnlCents >= config.strategy.takeProfitCents) {
-      logger.info('TAKE PROFIT triggered', { heldSide, bid, entry, pnlCents });
-      return await this.placeMarketExitOrder(market, heldSide, count);
+      return await fireExit(`TAKE PROFIT triggered (+${pnlCents}c)`);
     }
 
     // Stop loss: underwater by stopLossCents at any time.
     if (pnlCents <= -config.strategy.stopLossCents) {
-      logger.info('STOP LOSS triggered', { heldSide, bid, entry, pnlCents });
-      return await this.placeMarketExitOrder(market, heldSide, count);
+      return await fireExit(`STOP LOSS triggered (${pnlCents}c)`);
     }
 
     // Near expiry (<3 min): hold if winning, cut if losing.
@@ -1333,8 +1377,7 @@ export class ArbStrategy {
       const positionIsWinning = (isLong && btcAboveStrike) || (isShort && !btcAboveStrike);
 
       if (!positionIsWinning && pnlCents < -3) {
-        logger.info('Near-expiry cut-loss triggered', { secsLeft: secsLeft.toFixed(0), heldSide, btcAboveStrike, pnlCents });
-        return await this.placeMarketExitOrder(market, heldSide, count);
+        return await fireExit(`Near-expiry cut-loss triggered (${secsLeft.toFixed(0)}s left, ${pnlCents}c)`);
       }
       if (positionIsWinning) {
         // Hold to expiry — let theta work for us.
@@ -1344,8 +1387,7 @@ export class ArbStrategy {
 
     // Thesis failure: still losing with <5 min left.
     if (secsLeft < 300 && pnlCents < -5) {
-      logger.info('Thesis-failure exit triggered', { secsLeft: secsLeft.toFixed(0), pnlCents });
-      return await this.placeMarketExitOrder(market, heldSide, count);
+      return await fireExit(`Thesis-failure exit (${secsLeft.toFixed(0)}s left, ${pnlCents}c)`);
     }
 
     return null;

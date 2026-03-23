@@ -38,6 +38,9 @@ async function main(): Promise<void> {
   let fetchLoopActive = true;
   let balanceLogTimer: NodeJS.Timeout | null = null;
   let statusTimer: NodeJS.Timeout | null = null;
+  // BUG-M3: Guard timers — only run balance/status checks after both Kalshi and Coinbase are ready.
+  let coinbaseConnected = false;
+  let kalshiReady = false;
 
   // Cached state for the periodic status display (avoids extra API calls on every tick).
   let cachedBalanceCents = 0;
@@ -100,6 +103,7 @@ async function main(): Promise<void> {
 
   // Wire Coinbase price updates directly to evaluation — no timer involved.
   coinbaseClient.on('priceUpdate', (data: CoinbasePriceData) => {
+    coinbaseConnected = true;
     void evaluateOnTick(data);
   });
 
@@ -146,6 +150,7 @@ async function main(): Promise<void> {
         }
 
         latestMarket = market;
+        kalshiReady = true;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         const is404 = /\[404\]|not found/i.test(msg);
@@ -269,12 +274,15 @@ async function main(): Promise<void> {
     });
   }
 
-  // Log balance immediately at startup, then every 60s
-  void logBalance();
-  balanceLogTimer = setInterval(() => void logBalance(), 60_000);
+  // BUG-M3: Don't fire balance/status before connections are ready — calling
+  // Kalshi REST at startup before auth is initialized causes spurious errors.
+  balanceLogTimer = setInterval(() => {
+    if (coinbaseConnected && kalshiReady) void logBalance();
+  }, 60_000);
 
-  // Status display every 2 seconds
-  statusTimer = setInterval(() => void logStatus(), 2_000);
+  statusTimer = setInterval(() => {
+    if (coinbaseConnected && kalshiReady) void logStatus();
+  }, 2_000);
 
   // Auto-discover the current open market before starting — never rely on a stale .env ticker.
   try {
