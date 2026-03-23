@@ -53,8 +53,8 @@ export interface KalshiOrderRequest {
   side: 'yes' | 'no';
   count: number;
   action: 'buy' | 'sell';
-  type: 'limit' | 'market';
-  /** Limit only: max cents per contract. Omit for market orders. */
+  /** Kalshi requires a price on all orders — 'market' type is unsupported and broken; use 'limit' only. */
+  type: 'limit';
   yes_price?: number;
   no_price?: number;
   expiration_ts?: number; // Unix timestamp (seconds) for GTC expiration

@@ -352,6 +352,12 @@ export class ArbStrategy {
     }
 
     const coinbasePrice = coinbaseData.price;
+
+    // Guard: implausible Coinbase price (0, NaN, non-BTC range) would corrupt EMAs permanently.
+    if (!isPlausibleBtcUsd(coinbasePrice)) {
+      return this.hold(`Implausible Coinbase price (${coinbasePrice}) — skipping tick`);
+    }
+
     this.applyMarketFieldEnrichment(market, coinbasePrice);
 
     // Cross detection compares Coinbase BTC spot vs the fixed strike price (expiration_value_dollars).
@@ -389,6 +395,19 @@ export class ArbStrategy {
     // --- Guard: Must have enough time before expiry ---
     const secsLeft = this.secondsUntilClose(market);
     if (secsLeft < config.strategy.minSecondsBeforeExpiry) {
+      // Even inside the no-entry window, we must still check TP/SL so open positions can exit.
+      // Without this, a position surviving into final 45s rides to expiry unprotected.
+      const posContracts = config.dryRun
+        ? this.simulatedPositionContracts
+        : this.cachedPositionContracts;
+      if (posContracts !== 0) {
+        const isLongNow = posContracts > 0;
+        const isShortNow = posContracts < 0;
+        const earlyExit = await this.checkProfitAndLossExits(market, coinbasePrice, posContracts, market.expiration_value_dollars!, secsLeft);
+        if (earlyExit) return earlyExit;
+        // Fall through to hard hold — no new entries allowed this close to expiry.
+        return this.hold(`Market closes in ${secsLeft.toFixed(0)}s — holding position, no new entries (isLong=${isLongNow}, isShort=${isShortNow})`);
+      }
       return this.hold(`Market closes in ${secsLeft.toFixed(0)}s - too close to expiry`);
     }
     // --- Guard: Must not have too much time remaining (weak signal, uncertain) ---
@@ -769,11 +788,13 @@ export class ArbStrategy {
       this.crossTimestamps.push(Date.now());
       if (this.crossTimestamps.length > ArbStrategy.REGIME_MAX_CROSSES) {
         // Too many EMA crosses in the window - market is choppy, pause 30s.
+        // Return immediately so the triggering cross does NOT result in a trade.
         logger.warn('Regime filter triggered - too many EMA crosses, pausing 30s', {
           crossCount: this.crossTimestamps.length,
           windowMs: ArbStrategy.REGIME_WINDOW_MS,
         });
         this.regimePausedUntilMs = Date.now() + 30 * 1000;
+        return this.hold('Regime filter triggered — pausing 30s (choppy market)');
       }
     } else if (crossDown) {
       this.lastCrossDirection = 'down';
@@ -786,6 +807,7 @@ export class ArbStrategy {
           windowMs: ArbStrategy.REGIME_WINDOW_MS,
         });
         this.regimePausedUntilMs = Date.now() + 30 * 1000;
+        return this.hold('Regime filter triggered — pausing 30s (choppy market)');
       }
     }
 
@@ -816,6 +838,15 @@ export class ArbStrategy {
 
     // --- Flat: enter based on EMA crossover direction ---
     if (isFlat) {
+      // Displacement threshold: BTC must be at least X% past the strike before we enter.
+      // Filters out near-zero crosses (pure noise with no edge).
+      const displacementPct = Math.abs(coinbasePrice - targetPriceDollars) / targetPriceDollars;
+      if (displacementPct < config.strategy.displacementThresholdPct) {
+        return this.hold(
+          `Displacement too small to enter: ${(displacementPct * 100).toFixed(3)}% < ${(config.strategy.displacementThresholdPct * 100).toFixed(2)}% threshold`
+        );
+      }
+
       if (crossUp) {
         // EMA5 crossed above EMA20 → Coinbase just flipped bullish.
         // Kalshi is lagging - YES contracts still cheap. Enter long.
@@ -1159,7 +1190,8 @@ export class ArbStrategy {
     if (this.isOrderbookUnavailable(market)) {
       return this.hold('Orderbook unavailable - exit blocked');
     }
-    const can = await this.canPlaceNewOrder(market.ticker);
+    // Exit orders bypass cooldown — use flatten guard, not entry cooldown.
+    const can = await this.canPlaceExitFlattenOrder(market.ticker);
     if (!can.ok) return this.hold(can.reason ?? 'Cannot place exit order');
 
     if (count < 1) {
@@ -1333,6 +1365,10 @@ export class ArbStrategy {
     const heldSide: 'yes' | 'no' = isLong ? 'yes' : 'no';
     const bid = heldSide === 'yes' ? market.yes_bid : market.no_bid;
     const ask = heldSide === 'yes' ? market.yes_ask : market.no_ask;
+
+    // Guard: bid=0 or NaN means stale/bad API tick. Never act on these — a zero bid
+    // would compute pnlCents = -entry, falsely triggering a full-loss SL.
+    if (!bid || isNaN(bid)) return null;
     const entry = this.currentTradeEntryLimitCents;
     const count = Math.abs(positionContracts);
     // P&L relative to entry (ask). On entry, bid < ask so pnlCents starts negative by the spread.
@@ -1340,7 +1376,8 @@ export class ArbStrategy {
     // Spread at current tick — used to offset SL so the spread cost doesn't count against us.
     const spreadCents = Math.max(0, ask - bid);
     // Time since entry — used for SL grace period.
-    const msSinceEntry = this.currentTradeEntryTimeMs !== null ? Date.now() - this.currentTradeEntryTimeMs : Infinity;
+    // Unknown entry time → treat as 0 (just entered) so grace is conservatively applied.
+    const msSinceEntry = this.currentTradeEntryTimeMs !== null ? Date.now() - this.currentTradeEntryTimeMs : 0;
 
     // Helper: place exit and immediately set pendingPhase to prevent duplicate orders
     // being fired on subsequent ticks before the position cache refreshes (500ms TTL).
@@ -1404,9 +1441,8 @@ export class ArbStrategy {
       if (config.strategy.stopLossPct > 0 && entry > 0) {
         const slThresholdCents = entry * config.strategy.stopLossPct + spreadCents;
         if (pnlCents <= -slThresholdCents) {
-          const realLossCents = pnlCents + spreadCents; // loss ex-spread
-          const pnlPct = ((Math.abs(realLossCents) / entry) * 100).toFixed(1);
-          return await fireExit(`STOP LOSS triggered (${pnlCents.toFixed(1)}c net, -${pnlPct}% ex-spread)`);
+          const pnlPct = ((Math.abs(pnlCents) / entry) * 100).toFixed(1);
+          return await fireExit(`STOP LOSS triggered (${pnlCents.toFixed(1)}c = -${pnlPct}% of entry, spread offset=${spreadCents.toFixed(1)}c)`);
         }
       }
     } else {
