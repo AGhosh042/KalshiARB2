@@ -1168,8 +1168,7 @@ export class ArbStrategy {
       side,
       count,
       action: 'sell',
-      type: 'ioc',        // Kalshi requires IoC when reduce_only is set
-      reduce_only: true,  // tells Kalshi this closes an existing position — no margin required
+      type: 'limit',      // limit sell at current bid — fills immediately, no reduce_only needed
       ...(side === 'yes' ? { yes_price: limitPriceCents } : { no_price: limitPriceCents }),
     };
 
@@ -1255,8 +1254,7 @@ export class ArbStrategy {
       side,
       count,
       action: 'sell',
-      type: 'ioc',        // Kalshi requires IoC when reduce_only is set
-      reduce_only: true,  // tells Kalshi this closes an existing position — no margin required
+      type: 'limit',      // limit sell at current bid — Kalshi recognises as a close against existing position
       ...(side === 'yes' ? { yes_price: aggressivePriceCents } : { no_price: aggressivePriceCents }),
     };
 

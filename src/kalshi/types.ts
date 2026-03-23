@@ -53,17 +53,11 @@ export interface KalshiOrderRequest {
   side: 'yes' | 'no';
   count: number;
   action: 'buy' | 'sell';
-  type: 'limit' | 'market' | 'ioc';
+  type: 'limit' | 'market';
   /** Limit only: max cents per contract. Omit for market orders. */
   yes_price?: number;
   no_price?: number;
   expiration_ts?: number; // Unix timestamp (seconds) for GTC expiration
-  /**
-   * When true, Kalshi recognises this as closing an existing position and requires no
-   * additional margin. Without this flag every sell is treated as a potential new short,
-   * causing "insufficient_balance" errors even when you own the contracts being sold.
-   */
-  reduce_only?: boolean;
 }
 
 /**
