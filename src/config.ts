@@ -62,8 +62,10 @@ export interface Config {
     takeProfitCents: number;
     /** Exit when trade P&L reaches this fraction of cost basis (proportional TP). e.g. 0.10 = +10%. Set to 0 to disable. */
     takeProfitPct: number;
-    /** Exit when position is underwater by this many cents. */
+    /** Exit when position is underwater by this many cents (flat SL). Set to 0 to disable. */
     stopLossCents: number;
+    /** Exit when trade P&L drops below this fraction of cost basis (proportional SL). e.g. 0.10 = -10%. Set to 0 to disable. */
+    stopLossPct: number;
     balanceFractionPerTrade: number;
     /** After placing a limit exit, wait this long (live only); if still exposed, cancel limit and use market sells. */
     exitLimitGraceMs: number;
@@ -148,8 +150,10 @@ function loadConfig(): Config {
       takeProfitCents: getEnvNumber('TAKE_PROFIT_CENTS', 0),
       // Take profit when trade P&L reaches this % of cost basis. Default 10% (0.10). Set to 0 to disable.
       takeProfitPct: getEnvNumber('TAKE_PROFIT_PCT', 0.10),
-      // Stop loss when position is -12c underwater.
-      stopLossCents: getEnvNumber('STOP_LOSS_CENTS', 12),
+      // Flat stop loss (disabled by default — proportional SL below is used instead).
+      stopLossCents: getEnvNumber('STOP_LOSS_CENTS', 0),
+      // Proportional stop loss: mirrors takeProfitPct for 1:1 RR. Default 10% of entry. Set to 0 to disable.
+      stopLossPct: getEnvNumber('STOP_LOSS_PCT', 0.10),
       // BUG-H4: Was hardcoded — now env-overridable via BALANCE_FRACTION_PER_TRADE.
       balanceFractionPerTrade: getEnvNumber('BALANCE_FRACTION_PER_TRADE', 0.05),
       exitLimitGraceMs: getEnvNumber('EXIT_LIMIT_GRACE_MS', 5_000),

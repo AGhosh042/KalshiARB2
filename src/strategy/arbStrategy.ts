@@ -1376,9 +1376,19 @@ export class ArbStrategy {
       }
     }
 
-    // Stop loss: underwater by stopLossCents at any time.
-    if (pnlCents <= -config.strategy.stopLossCents) {
-      return await fireExit(`STOP LOSS triggered (${pnlCents}c)`);
+    // Stop loss (flat): underwater by stopLossCents at any time.
+    if (config.strategy.stopLossCents > 0 && pnlCents <= -config.strategy.stopLossCents) {
+      return await fireExit(`STOP LOSS triggered (${pnlCents}c flat)`);
+    }
+
+    // Stop loss (proportional): mirrors takeProfitPct for 1:1 RR.
+    // e.g. entry=43c, pct=0.10 fires when bid <= 38.7c (-4.3c = -10% of entry).
+    if (config.strategy.stopLossPct > 0 && entry > 0) {
+      const slThresholdCents = entry * config.strategy.stopLossPct;
+      if (pnlCents <= -slThresholdCents) {
+        const pnlPct = ((Math.abs(pnlCents) / entry) * 100).toFixed(1);
+        return await fireExit(`STOP LOSS triggered (${pnlCents.toFixed(1)}c = -${pnlPct}% of entry)`);
+      }
     }
 
     // Near expiry (<3 min): hold if winning, cut if losing.
